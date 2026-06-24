@@ -1,0 +1,1 @@
+ALTER TABLE product_variant ADD COLUMN base_price BIGINT NOT NULL DEFAULT 0;

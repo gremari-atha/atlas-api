@@ -1,0 +1,1 @@
+DROP TABLE IF EXISTS tele_notifier CASCADE;

@@ -1,0 +1,11 @@
+# Compiled binaries
+/server
+/migrate
+
+# Local environment variables
+/.env
+
+# Browser profile directory
+/scratch/chrome-profile/
+
+

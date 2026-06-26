@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 
@@ -41,15 +42,35 @@ func main() {
 }
 
 func runMasterMigrate(dbURL, command string) {
+	// Ensure master schema exists
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to database to prepare master schema: %v", err)
+	}
+	_, err = db.Exec("CREATE SCHEMA IF NOT EXISTS master")
+	if err != nil {
+		db.Close()
+		log.Fatalf("Failed to create master schema: %v", err)
+	}
+	db.Close()
+
 	// Append search_path parameter to connection URL
 	urlWithSchema := dbURL
-	if strings.Contains(dbURL, "?") {
-		urlWithSchema += "&search_path=master,public"
+	u, err := url.Parse(dbURL)
+	if err == nil {
+		q := u.Query()
+		q.Set("search_path", "master,public")
+		u.RawQuery = q.Encode()
+		urlWithSchema = u.String()
 	} else {
-		urlWithSchema += "?search_path=master,public"
+		if strings.Contains(dbURL, "?") {
+			urlWithSchema += "&search_path=master,public"
+		} else {
+			urlWithSchema += "?search_path=master,public"
+		}
 	}
 
-	m, err := migrate.New("file://db/migrations/master", urlWithSchema)
+	m, err := migrate.New("file://migrations/master", urlWithSchema)
 	if err != nil {
 		log.Fatalf("Failed to initialize master migration: %v", err)
 	}
@@ -89,14 +110,29 @@ func runTenantMigrate(dbURL, command string) {
 	for _, tenantID := range tenants {
 		fmt.Printf("Running migration for tenant '%s'...\n", tenantID)
 		
-		urlWithSchema := dbURL
-		if strings.Contains(dbURL, "?") {
-			urlWithSchema += fmt.Sprintf("&search_path=%s,public", tenantID)
-		} else {
-			urlWithSchema += fmt.Sprintf("?search_path=%s,public", tenantID)
+		// Ensure tenant schema exists
+		_, err = db.Exec(fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS "%s"`, tenantID))
+		if err != nil {
+			log.Printf("Failed to create schema for tenant %s: %v", tenantID, err)
+			continue
 		}
 
-		m, err := migrate.New("file://db/migrations/tenant", urlWithSchema)
+		urlWithSchema := dbURL
+		u, err := url.Parse(dbURL)
+		if err == nil {
+			q := u.Query()
+			q.Set("search_path", tenantID+",public")
+			u.RawQuery = q.Encode()
+			urlWithSchema = u.String()
+		} else {
+			if strings.Contains(dbURL, "?") {
+				urlWithSchema += fmt.Sprintf("&search_path=%s,public", tenantID)
+			} else {
+				urlWithSchema += fmt.Sprintf("?search_path=%s,public", tenantID)
+			}
+		}
+
+		m, err := migrate.New("file://migrations/tenant", urlWithSchema)
 		if err != nil {
 			log.Printf("Failed to initialize migration for tenant %s: %v", tenantID, err)
 			continue

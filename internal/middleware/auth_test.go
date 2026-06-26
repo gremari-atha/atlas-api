@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"atlas-api/internal/config"
+
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -19,10 +21,13 @@ const (
 )
 
 func TestAuthMiddleware(t *testing.T) {
+	// Load environment variables for the test
+	config.LoadEnv("../../.env")
+
 	// Initialize database connection for TenantAuth credential lookup
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://admin_vc:adminpassword@localhost:5432/volvecapital?sslmode=disable"
+		dbURL = "postgres://admin:admin123@localhost:5432/atlas?sslmode=disable"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

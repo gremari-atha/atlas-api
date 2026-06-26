@@ -1,1 +1,0 @@
-ALTER TABLE task_queue ADD COLUMN attempt INTEGER DEFAULT 0;

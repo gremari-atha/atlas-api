@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -335,13 +336,21 @@ func (h *TenantHandler) Remove(w http.ResponseWriter, r *http.Request) {
 
 func RunTenantMigrations(dbURL string, tenantID string) error {
 	urlWithSchema := dbURL
-	if strings.Contains(dbURL, "?") {
-		urlWithSchema += fmt.Sprintf("&search_path=%s,public", tenantID)
+	u, err := url.Parse(dbURL)
+	if err == nil {
+		q := u.Query()
+		q.Set("search_path", tenantID+",public")
+		u.RawQuery = q.Encode()
+		urlWithSchema = u.String()
 	} else {
-		urlWithSchema += fmt.Sprintf("?search_path=%s,public", tenantID)
+		if strings.Contains(dbURL, "?") {
+			urlWithSchema += fmt.Sprintf("&search_path=%s,public", tenantID)
+		} else {
+			urlWithSchema += fmt.Sprintf("?search_path=%s,public", tenantID)
+		}
 	}
 
-	m, err := migrate.New("file://db/migrations/tenant", urlWithSchema)
+	m, err := migrate.New("file://migrations/tenant", urlWithSchema)
 	if err != nil {
 		return fmt.Errorf("failed to initialize migration for tenant %s: %w", tenantID, err)
 	}

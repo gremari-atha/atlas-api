@@ -11,6 +11,8 @@ import (
 	"os"
 	"time"
 
+	"atlas-api/internal/config"
+
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,10 +29,14 @@ const (
 func main() {
 	slog.Info("=== STARTING PHASE 7 REAL-WORLD E2E INTEGRATION TEST ===")
 
+	// Load env
+	config.LoadEnv(".env")
+	config.LoadEnv("../.env")
+
 	// 1. Database Connection
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://admin_vc:adminpassword@localhost:5432/volvecapital?sslmode=disable"
+		dbURL = "postgres://admin:admin123@localhost:5432/atlas?sslmode=disable"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

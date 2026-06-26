@@ -26,7 +26,7 @@ COPY --from=builder /app/server /app/server
 COPY --from=builder /app/migrate /app/migrate
 
 # Copy migrations files
-COPY db/migrations /app/db/migrations
+COPY migrations /app/migrations
 
 # Copy env template
 COPY .env.example /app/.env

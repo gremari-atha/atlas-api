@@ -1,0 +1,72 @@
+CREATE TABLE account (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  account_password VARCHAR NOT NULL,
+  subscription_expiry TIMESTAMP WITH TIME ZONE NOT NULL,
+  status VARCHAR,
+  billing VARCHAR,
+  batch_start_date TIMESTAMP WITH TIME ZONE,
+  batch_end_date TIMESTAMP WITH TIME ZONE,
+  email_id BIGINT NOT NULL REFERENCES email(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  product_variant_id BIGINT NOT NULL REFERENCES product_variant(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  label VARCHAR,
+  freeze_until TIMESTAMP WITH TIME ZONE,
+  pinned BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+) WITH (fillfactor=90);
+
+CREATE TRIGGER account_set_updated_at
+BEFORE UPDATE ON account
+FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+CREATE TABLE account_profile (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name VARCHAR NOT NULL,
+  max_user INTEGER NOT NULL DEFAULT 1,
+  allow_generate BOOLEAN NOT NULL DEFAULT TRUE,
+  metadata TEXT,
+  account_id BIGINT NOT NULL REFERENCES account(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+) WITH (fillfactor=90);
+
+CREATE TRIGGER account_profile_set_updated_at
+BEFORE UPDATE ON account_profile
+FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+CREATE TABLE account_user (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name VARCHAR NOT NULL,
+  status VARCHAR,
+  account_id BIGINT NOT NULL REFERENCES account(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  account_profile_id BIGINT NOT NULL REFERENCES account_profile(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  expired_at TIMESTAMP WITH TIME ZONE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+) WITH (fillfactor=90);
+
+CREATE TRIGGER account_user_set_updated_at
+BEFORE UPDATE ON account_user
+FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+CREATE TABLE account_modifier (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  modifier_id VARCHAR NOT NULL,
+  account_id BIGINT NOT NULL REFERENCES account(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  metadata TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+) WITH (fillfactor=90);
+
+CREATE TRIGGER account_modifier_set_updated_at
+BEFORE UPDATE ON account_modifier
+FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+-- Indexes for performance optimization
+CREATE INDEX idx_account_email_id ON account (email_id);
+CREATE INDEX idx_account_product_variant_status ON account (product_variant_id, status);
+CREATE INDEX idx_account_profile_account_id ON account_profile (account_id);
+CREATE INDEX idx_account_user_profile_status ON account_user (account_profile_id, status);
+CREATE INDEX idx_account_user_account_id ON account_user (account_id);
+CREATE INDEX idx_account_modifier_account_id ON account_modifier (account_id);

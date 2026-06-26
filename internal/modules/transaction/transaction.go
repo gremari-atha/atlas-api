@@ -830,12 +830,52 @@ func (h *TransactionHandler) FindAllExpenses(w http.ResponseWriter, r *http.Requ
 	tenantID := uCtx.TenantID
 	page, limit, offset := response.ParsePagination(r)
 
-	var expenses []Expense
+	subjectIDStr := r.URL.Query().Get("subject_id")
+	expenseType := r.URL.Query().Get("type")
+
+	// Validation checks
+	if subjectIDStr != "" && expenseType == "" {
+		response.Error(w, http.StatusBadRequest, "query param subject_id memerlukan konteks type")
+		return
+	}
+	if expenseType == "global" && subjectIDStr != "" {
+		response.Error(w, http.StatusBadRequest, "konteks global tidak boleh memiliki subject_id")
+		return
+	}
+
+	var whereClauses []string
+	var args []interface{}
+	argIdx := 1
+
+	if expenseType != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("type = $%d", argIdx))
+		args = append(args, expenseType)
+		argIdx++
+	}
+
+	if subjectIDStr != "" {
+		subjectID, err := strconv.ParseInt(subjectIDStr, 10, 64)
+		if err != nil {
+			response.Error(w, http.StatusBadRequest, "invalid subject_id format")
+			return
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("subject_id = $%d", argIdx))
+		args = append(args, subjectID)
+		argIdx++
+	}
+
+	whereSQL := ""
+	if len(whereClauses) > 0 {
+		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	expenses := []Expense{}
 	var total int64
 
-	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".expense`, tenantID)
-	err := h.dbPool.QueryRow(r.Context(), countQuery).Scan(&total)
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".expense %s`, tenantID, whereSQL)
+	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
+		slog.Error("failed to count expenses", "err", err)
 		response.Error(w, http.StatusInternalServerError, "database count failed")
 		return
 	}
@@ -843,12 +883,15 @@ func (h *TransactionHandler) FindAllExpenses(w http.ResponseWriter, r *http.Requ
 	selectQuery := fmt.Sprintf(`
 		SELECT id, subject_id, type, amount, note, created_at
 		FROM "%s".expense
+		%s
 		ORDER BY created_at DESC
-		LIMIT $1 OFFSET $2
-	`, tenantID)
+		LIMIT $%d OFFSET $%d
+	`, tenantID, whereSQL, argIdx, argIdx+1)
 
-	rows, err := h.dbPool.Query(r.Context(), selectQuery, limit, offset)
+	selectArgs := append(args, limit, offset)
+	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
+		slog.Error("failed to query expenses", "err", err)
 		response.Error(w, http.StatusInternalServerError, "database query failed")
 		return
 	}

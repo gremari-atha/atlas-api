@@ -1,2 +1,0 @@
-DROP MATERIALIZED VIEW IF EXISTS monthly_product_sales_stats CASCADE;
-DROP MATERIALIZED VIEW IF EXISTS daily_product_sales_stats CASCADE;

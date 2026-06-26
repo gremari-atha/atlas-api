@@ -1,1 +1,0 @@
-ALTER TABLE task_queue DROP COLUMN IF EXISTS attempt;

@@ -2,6 +2,7 @@ package response
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 )
@@ -41,13 +42,19 @@ func JSON(w http.ResponseWriter, status int, data interface{}) {
 	}
 }
 
-// Error sends a standardized error JSON response.
+// Error sends a standardized error JSON response and logs it automatically.
 func Error(w http.ResponseWriter, status int, message string) {
+	if status >= 500 {
+		slog.Error(message, "status", status)
+	} else if status >= 400 {
+		slog.Warn(message, "status", status)
+	}
 	JSON(w, status, ErrorResponse{Error: message})
 }
 
-// ValidationError sends a standardized validation error JSON response.
+// ValidationError sends a standardized validation error JSON response and logs it automatically.
 func ValidationError(w http.ResponseWriter, errors []string) {
+	slog.Warn("validation failed", "status", http.StatusBadRequest, "errors", errors)
 	JSON(w, http.StatusBadRequest, ValidationErrorResponse{
 		Error:  "validation failed",
 		Errors: errors,

@@ -20,6 +20,7 @@ import (
 	"atlas-api/internal/modules/account"
 	"atlas-api/internal/modules/logger"
 	"atlas-api/internal/modules/product"
+	"atlas-api/internal/modules/email"
 	"atlas-api/internal/modules/emailforward"
 	"atlas-api/internal/modules/statistic"
 	"atlas-api/internal/modules/tenant"
@@ -111,8 +112,8 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(chimiddleware.RequestID)
 	r.Use(chimiddleware.RealIP)
-	r.Use(chimiddleware.Logger)
-	r.Use(chimiddleware.Recoverer)
+	r.Use(middleware.StructuredLogger)
+	r.Use(middleware.StructuredRecoverer)
 	r.Use(corsMiddleware)
 
 	// Hello World Root Endpoint
@@ -153,6 +154,9 @@ func main() {
 
 	emailForwardHandler := emailforward.NewEmailForwardHandler(dbPool)
 	emailForwardHandler.RegisterRoutes(r)
+
+	emailHandler := email.NewEmailHandler(dbPool)
+	emailHandler.RegisterRoutes(r, auth)
 
 	// 6. Define Test Routes for Phase 3 Middleware
 	r.Route("/test", func(r chi.Router) {

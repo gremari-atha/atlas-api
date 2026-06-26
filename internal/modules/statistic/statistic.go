@@ -298,22 +298,25 @@ func (h *StatisticHandler) GetAllStatistic(w http.ResponseWriter, r *http.Reques
 	}
 
 	pRows, err := h.dbPool.Query(r.Context(), productSql, startDate)
-	if err == nil {
-		defer pRows.Close()
-		pStats := []ProductStats{}
-		for pRows.Next() {
-			var ps ProductStats
-			err = pRows.Scan(&ps.ProductVariantID, &ps.ItemsSold, &ps.ProductVariant.Name, &ps.ProductVariant.Product.ID, &ps.ProductVariant.Product.Name)
-			if err == nil {
-				ps.ProductVariant.ID = ps.ProductVariantID
-				ps.ProductVariant.Product.ID = ps.ProductVariant.Product.ID
-				pStats = append(pStats, ps)
-			}
-		}
-		responsePayload.Product = pStats
-	} else {
-		responsePayload.Product = []ProductStats{}
+	if err != nil {
+		slog.Error("failed to query product sales stats", "err", err)
+		response.Error(w, http.StatusInternalServerError, "database product query failed")
+		return
 	}
+	defer pRows.Close()
+	pStats := []ProductStats{}
+	for pRows.Next() {
+		var ps ProductStats
+		err = pRows.Scan(&ps.ProductVariantID, &ps.ItemsSold, &ps.ProductVariant.Name, &ps.ProductVariant.Product.ID, &ps.ProductVariant.Product.Name)
+		if err != nil {
+			slog.Error("failed to scan product stats row", "err", err)
+			response.Error(w, http.StatusInternalServerError, "scan failed")
+			return
+		}
+		ps.ProductVariant.ID = ps.ProductVariantID
+		pStats = append(pStats, ps)
+	}
+	responsePayload.Product = pStats
 
 	// 4. Query Platform Stats
 	var platformSql string
@@ -340,19 +343,23 @@ func (h *StatisticHandler) GetAllStatistic(w http.ResponseWriter, r *http.Reques
 	}
 
 	platRows, err := h.dbPool.Query(r.Context(), platformSql, startDate)
-	if err == nil {
-		defer platRows.Close()
-		platStats := []PlatformStats{}
-		for platRows.Next() {
-			var pl PlatformStats
-			if err := platRows.Scan(&pl.Platform, &pl.TransactionCount); err == nil {
-				platStats = append(platStats, pl)
-			}
-		}
-		responsePayload.Platform = platStats
-	} else {
-		responsePayload.Platform = []PlatformStats{}
+	if err != nil {
+		slog.Error("failed to query platform stats", "err", err)
+		response.Error(w, http.StatusInternalServerError, "database platform query failed")
+		return
 	}
+	defer platRows.Close()
+	platStats := []PlatformStats{}
+	for platRows.Next() {
+		var pl PlatformStats
+		if err := platRows.Scan(&pl.Platform, &pl.TransactionCount); err != nil {
+			slog.Error("failed to scan platform stats row", "err", err)
+			response.Error(w, http.StatusInternalServerError, "scan failed")
+			return
+		}
+		platStats = append(platStats, pl)
+	}
+	responsePayload.Platform = platStats
 
 	// 5. Query Peak Hour Stats
 	peakHourSql := fmt.Sprintf(`
@@ -366,19 +373,23 @@ func (h *StatisticHandler) GetAllStatistic(w http.ResponseWriter, r *http.Reques
 	`, tenantID)
 
 	peakRows, err := h.dbPool.Query(r.Context(), peakHourSql, startDate)
-	if err == nil {
-		defer peakRows.Close()
-		peakStats := []PeakHourStats{}
-		for peakRows.Next() {
-			var ph PeakHourStats
-			if err := peakRows.Scan(&ph.Hour, &ph.TransactionCount); err == nil {
-				peakStats = append(peakStats, ph)
-			}
-		}
-		responsePayload.PeakHour = peakStats
-	} else {
-		responsePayload.PeakHour = []PeakHourStats{}
+	if err != nil {
+		slog.Error("failed to query peak hour stats", "err", err)
+		response.Error(w, http.StatusInternalServerError, "database peak hour query failed")
+		return
 	}
+	defer peakRows.Close()
+	peakStats := []PeakHourStats{}
+	for peakRows.Next() {
+		var ph PeakHourStats
+		if err := peakRows.Scan(&ph.Hour, &ph.TransactionCount); err != nil {
+			slog.Error("failed to scan peak hour stats row", "err", err)
+			response.Error(w, http.StatusInternalServerError, "scan failed")
+			return
+		}
+		peakStats = append(peakStats, ph)
+	}
+	responsePayload.PeakHour = peakStats
 
 	response.JSON(w, http.StatusOK, responsePayload)
 }

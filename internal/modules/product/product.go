@@ -178,6 +178,7 @@ func (h *ProductHandler) FindAllProducts(w http.ResponseWriter, r *http.Request)
 	var total int64
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
+		slog.Error("failed to count products", "err", err)
 		response.Error(w, http.StatusInternalServerError, "database count failed")
 		return
 	}
@@ -193,6 +194,7 @@ func (h *ProductHandler) FindAllProducts(w http.ResponseWriter, r *http.Request)
 	selectArgs := append(args, limit, offset)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
+		slog.Error("failed to query products", "err", err)
 		response.Error(w, http.StatusInternalServerError, "database query failed")
 		return
 	}
@@ -302,6 +304,7 @@ func (h *ProductHandler) CreateProduct(w http.ResponseWriter, r *http.Request) {
 	`, tenantID), payload.Name).Scan(&p.ID, &p.Name, &p.CreatedAt, &p.UpdatedAt)
 
 	if err != nil {
+		slog.Error("failed to insert product", "err", err)
 		response.Error(w, http.StatusInternalServerError, "failed to insert product")
 		return
 	}
@@ -316,6 +319,7 @@ func (h *ProductHandler) CreateProductWithVariant(w http.ResponseWriter, r *http
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
+		slog.Error("failed to start transaction to create product with variants", "err", err)
 		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
 		return
 	}
@@ -337,6 +341,7 @@ func (h *ProductHandler) CreateProductWithVariant(w http.ResponseWriter, r *http
 		RETURNING id, name, created_at, updated_at
 	`, tenantID), payload.Name).Scan(&p.ID, &p.Name, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
+		slog.Error("failed to insert product within transaction", "err", err)
 		response.Error(w, http.StatusInternalServerError, "failed to insert product")
 		return
 	}
@@ -353,6 +358,7 @@ func (h *ProductHandler) CreateProductWithVariant(w http.ResponseWriter, r *http
 			&pv.ID, &pv.Name, &pv.Duration, &pv.Interval, &pv.Cooldown, &pv.CopyTemplate, &pv.ProductID, &pv.CreatedAt, &pv.UpdatedAt,
 		)
 		if err != nil {
+			slog.Error("failed to insert product variant within transaction", "err", err)
 			response.Error(w, http.StatusInternalServerError, "failed to insert variants")
 			return
 		}
@@ -360,6 +366,7 @@ func (h *ProductHandler) CreateProductWithVariant(w http.ResponseWriter, r *http
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
+		slog.Error("failed to commit transaction to create product with variants", "err", err)
 		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
 		return
 	}
@@ -397,6 +404,7 @@ func (h *ProductHandler) RemoveProduct(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".product WHERE id = $1`, tenantID), id)
 	if err != nil {
+		slog.Error("failed to delete product", "err", err)
 		response.Error(w, http.StatusInternalServerError, "failed to delete product")
 		return
 	}
@@ -433,6 +441,7 @@ func (h *ProductHandler) FindAllVariants(w http.ResponseWriter, r *http.Request)
 	var total int64
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
+		slog.Error("failed to count product variants", "err", err)
 		response.Error(w, http.StatusInternalServerError, "database count failed")
 		return
 	}
@@ -448,6 +457,7 @@ func (h *ProductHandler) FindAllVariants(w http.ResponseWriter, r *http.Request)
 	selectArgs := append(args, limit, offset)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
+		slog.Error("failed to query product variants", "err", err)
 		response.Error(w, http.StatusInternalServerError, "database query failed")
 		return
 	}
@@ -458,6 +468,7 @@ func (h *ProductHandler) FindAllVariants(w http.ResponseWriter, r *http.Request)
 		var v ProductVariant
 		err = rows.Scan(&v.ID, &v.Name, &v.Duration, &v.Interval, &v.Cooldown, &v.CopyTemplate, &v.ProductID, &v.CreatedAt, &v.UpdatedAt)
 		if err != nil {
+			slog.Error("failed to scan product variant row", "err", err)
 			response.Error(w, http.StatusInternalServerError, "database scan failed")
 			return
 		}
@@ -509,6 +520,7 @@ func (h *ProductHandler) CreateVariant(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err != nil {
+		slog.Error("failed to insert product variant", "err", err)
 		response.Error(w, http.StatusInternalServerError, "failed to insert variant")
 		return
 	}
@@ -524,6 +536,7 @@ func (h *ProductHandler) UpdateVariant(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
+		slog.Error("failed to start transaction to update variant", "err", err)
 		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
 		return
 	}
@@ -577,6 +590,7 @@ func (h *ProductHandler) UpdateVariant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
+		slog.Error("failed to commit transaction to update variant", "err", err)
 		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
 		return
 	}
@@ -597,6 +611,7 @@ func (h *ProductHandler) RemoveVariant(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".product_variant WHERE id = $1`, tenantID), id)
 	if err != nil {
+		slog.Error("failed to delete product variant", "err", err)
 		response.Error(w, http.StatusInternalServerError, "failed to delete variant")
 		return
 	}
@@ -659,6 +674,7 @@ func (h *ProductHandler) FindAllPlatformProducts(w http.ResponseWriter, r *http.
 	var total int64
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
+		slog.Error("failed to count platform products", "err", err)
 		response.Error(w, http.StatusInternalServerError, "database count failed")
 		return
 	}
@@ -674,6 +690,7 @@ func (h *ProductHandler) FindAllPlatformProducts(w http.ResponseWriter, r *http.
 	selectArgs := append(args, limit, offset)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
+		slog.Error("failed to query platform products", "err", err)
 		response.Error(w, http.StatusInternalServerError, "database query failed")
 		return
 	}
@@ -684,6 +701,7 @@ func (h *ProductHandler) FindAllPlatformProducts(w http.ResponseWriter, r *http.
 		var pp PlatformProduct
 		err = rows.Scan(&pp.ID, &pp.Platform, &pp.Name, &pp.Variant, &pp.ProductVariantID, &pp.CreatedAt, &pp.UpdatedAt)
 		if err != nil {
+			slog.Error("failed to scan platform product row", "err", err)
 			response.Error(w, http.StatusInternalServerError, "database scan failed")
 			return
 		}
@@ -763,6 +781,7 @@ func (h *ProductHandler) CreatePlatformProduct(w http.ResponseWriter, r *http.Re
 	)
 
 	if err != nil {
+		slog.Error("failed to insert platform product", "err", err)
 		response.Error(w, http.StatusInternalServerError, "failed to insert platform product")
 		return
 	}
@@ -790,6 +809,7 @@ func (h *ProductHandler) UpdatePlatformProduct(w http.ResponseWriter, r *http.Re
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
+		slog.Error("failed to start transaction to update platform product", "err", err)
 		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
 		return
 	}
@@ -867,6 +887,7 @@ func (h *ProductHandler) UpdatePlatformProduct(w http.ResponseWriter, r *http.Re
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
+		slog.Error("failed to commit transaction to update platform product", "err", err)
 		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
 		return
 	}
@@ -887,6 +908,7 @@ func (h *ProductHandler) RemovePlatformProduct(w http.ResponseWriter, r *http.Re
 
 	res, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".platform_product WHERE id = $1`, tenantID), id)
 	if err != nil {
+		slog.Error("failed to delete platform product", "err", err)
 		response.Error(w, http.StatusInternalServerError, "failed to delete platform product")
 		return
 	}

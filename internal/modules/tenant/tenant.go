@@ -244,7 +244,7 @@ func (h *TenantHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// 3. Run migrations on the new schema using golang-migrate
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://admin_vc:adminpassword@localhost:5432/volvecapital?sslmode=disable"
+		dbURL = "postgres://postgres:postgres@localhost:5432/atlas?sslmode=disable"
 	}
 
 	slog.Info("running dynamic migration for new tenant schema", "tenant_id", payload.ID)

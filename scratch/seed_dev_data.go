@@ -17,7 +17,7 @@ const (
 func main() {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://admin_vc:adminpassword@localhost:5432/volvecapital?sslmode=disable"
+		dbURL = "postgres://postgres:postgres@localhost:5432/atlas?sslmode=disable"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
 	defer cancel()

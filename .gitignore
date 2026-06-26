@@ -1,6 +1,7 @@
 # Compiled binaries
 /server
 /migrate
+/build/
 
 # Local environment variables
 /.env

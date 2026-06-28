@@ -132,6 +132,7 @@ func main() {
 		"event": "subscribe-event",
 		"data": map[string]string{
 			"eventName": otpEventName,
+			"requestId": "req-otp-sub-p7",
 		},
 	}
 	subOtpBytes, _ := json.Marshal(subOtp)
@@ -141,10 +142,50 @@ func main() {
 		"event": "subscribe-event",
 		"data": map[string]string{
 			"eventName": urlEventName,
+			"requestId": "req-url-sub-p7",
 		},
 	}
 	subUrlBytes, _ := json.Marshal(subUrl)
 	_ = conn.WriteMessage(websocket.TextMessage, subUrlBytes)
+
+	// Read and verify ACKs
+	var acksReceived int
+	for acksReceived < 2 {
+		_, wsMsg, err := conn.ReadMessage()
+		if err != nil {
+			slog.Error("failed to read WS message", "err", err)
+			os.Exit(1)
+		}
+		lines := bytes.Split(wsMsg, []byte{'\n'})
+		for _, line := range lines {
+			line = bytes.TrimSpace(line)
+			if len(line) == 0 {
+				continue
+			}
+			slog.Info("Received JSON frame from server", "payload", string(line))
+			var ack struct {
+				Event string `json:"event"`
+				Data  struct {
+					EventName string `json:"eventName"`
+					RequestID string `json:"requestId"`
+					Status    string `json:"status"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(line, &ack); err != nil {
+				slog.Error("failed to unmarshal ACK payload", "err", err)
+				os.Exit(1)
+			}
+			if ack.Event != "subscribe-event-ack" {
+				slog.Error("expected event code 'subscribe-event-ack'", "got", ack.Event)
+				os.Exit(1)
+			}
+			if ack.Data.Status != "success" {
+				slog.Error("ACK status is not success", "status", ack.Data.Status)
+				os.Exit(1)
+			}
+			acksReceived++
+		}
+	}
 
 	// Wait to make sure subscriptions register in connection hub
 	time.Sleep(100 * time.Millisecond)

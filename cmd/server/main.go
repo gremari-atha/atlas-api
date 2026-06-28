@@ -25,6 +25,7 @@ import (
 	"atlas-api/internal/modules/statistic"
 	"atlas-api/internal/modules/tenant"
 	"atlas-api/internal/modules/transaction"
+	"atlas-api/internal/modules/bot"
 
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
@@ -157,6 +158,9 @@ func main() {
 
 	emailHandler := email.NewEmailHandler(dbPool)
 	emailHandler.RegisterRoutes(r, auth)
+
+	botHandler := bot.NewBotHandler(dbPool, wsHub)
+	botHandler.RegisterRoutes(r, auth)
 
 	// 6. Define Test Routes for Phase 3 Middleware
 	r.Route("/test", func(r chi.Router) {

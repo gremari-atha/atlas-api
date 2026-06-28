@@ -38,6 +38,7 @@ type Client struct {
 	ConnectionType string
 	Inflight       int
 	ConnectedAt    int64
+	Status         string // "ACTIVE" or "STANDBY"
 	Send           chan []byte
 }
 

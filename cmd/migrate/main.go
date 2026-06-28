@@ -31,6 +31,9 @@ func main() {
 		log.Fatal("DATABASE_URL is required")
 	}
 
+	// Verify and enable TimescaleDB extension
+	checkAndEnableTimescaleDB(dbURL)
+
 	switch targetSchema {
 	case "master":
 		runMasterMigrate(dbURL, command)
@@ -39,6 +42,45 @@ func main() {
 	default:
 		log.Fatalf("Unsupported target schema '%s'. Allowed: master, tenant", targetSchema)
 	}
+}
+
+func checkAndEnableTimescaleDB(dbURL string) {
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to database for TimescaleDB check: %v", err)
+	}
+	defer db.Close()
+
+	// 1. Check if timescaledb extension is already enabled
+	var enabled bool
+	err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')").Scan(&enabled)
+	if err != nil {
+		log.Fatalf("Failed to query pg_extension: %v", err)
+	}
+
+	if enabled {
+		log.Println("TimescaleDB extension is already enabled.")
+		return
+	}
+
+	// 2. Check if timescaledb extension is available on the server
+	var available bool
+	err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb')").Scan(&available)
+	if err != nil {
+		log.Fatalf("Failed to query pg_available_extensions: %v", err)
+	}
+
+	if !available {
+		log.Fatal("TimescaleDB extension is not available/installed on this PostgreSQL server. This application requires TimescaleDB.")
+	}
+
+	// 3. Enable TimescaleDB extension
+	log.Println("Enabling TimescaleDB extension...")
+	_, err = db.Exec("CREATE EXTENSION IF NOT EXISTS timescaledb")
+	if err != nil {
+		log.Fatalf("Failed to enable TimescaleDB extension: %v", err)
+	}
+	log.Println("TimescaleDB extension enabled successfully.")
 }
 
 func runMasterMigrate(dbURL, command string) {

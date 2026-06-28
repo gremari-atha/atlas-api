@@ -36,6 +36,7 @@ type Hub struct {
 	events     map[string]map[string]*Client // eventName -> clientId -> Client
 	mutex      sync.RWMutex
 	dbTimeout  time.Duration
+	taskBots   map[string]string // taskId -> clientId
 }
 
 // NewHub constructs a new Connection Hub
@@ -47,6 +48,7 @@ func NewHub(dbPool *pgxpool.Pool) *Hub {
 		unregister: make(chan *Client),
 		events:     make(map[string]map[string]*Client),
 		dbTimeout:  config.GetEnvAsDurationMs("DB_TIMEOUT", 5000*time.Millisecond),
+		taskBots:   make(map[string]string),
 	}
 }
 
@@ -60,6 +62,10 @@ func (h *Hub) Run(ctx context.Context) {
 			h.mutex.Unlock()
 			slog.Info("websocket client registered successfully", "client_id", client.ID, "name", client.Name, "tenant_id", client.TenantID)
 
+			if client.ConnectionType == "BOT" {
+				h.BroadcastEvent("bot:list-update:"+client.TenantID, h.GetActiveBotsList(client.TenantID))
+			}
+
 		case client := <-h.unregister:
 			h.mutex.Lock()
 			if _, ok := h.clients[client.ID]; ok {
@@ -72,9 +78,20 @@ func (h *Hub) Run(ctx context.Context) {
 						delete(h.events, eventName)
 					}
 				}
-				slog.Info("websocket client unregistered", "client_id", client.ID, "name", client.Name)
+				// Clean task mappings for this bot
+				for tId, cId := range h.taskBots {
+					if cId == client.ID {
+						delete(h.taskBots, tId)
+					}
+				}
+				h.mutex.Unlock()
+
+				if client.ConnectionType == "BOT" {
+					h.BroadcastEvent("bot:list-update:"+client.TenantID, h.GetActiveBotsList(client.TenantID))
+				}
+			} else {
+				h.mutex.Unlock()
 			}
-			h.mutex.Unlock()
 
 		case <-ctx.Done():
 			return
@@ -154,6 +171,7 @@ func (h *Hub) AuthenticateAndUpgrade(w http.ResponseWriter, r *http.Request) {
 		ConnectionType: connType,
 		Inflight:       0,
 		ConnectedAt:    time.Now().UnixMilli(),
+		Status:         "ACTIVE",
 		Send:           make(chan []byte, 256),
 	}
 
@@ -236,6 +254,7 @@ func (h *Hub) DispatchTask(ctx context.Context, taskId string, tenantId string, 
 	}
 
 	bot.Inflight++
+	h.taskBots[taskId] = bot.ID
 	h.mutex.Unlock()
 
 	dispatchMsg := map[string]interface{}{
@@ -265,7 +284,7 @@ func (h *Hub) DispatchTask(ctx context.Context, taskId string, tenantId string, 
 func (h *Hub) getAvailableBot(tenantId string) *Client {
 	var candidates []*Client
 	for _, c := range h.clients {
-		if c.TenantID == tenantId && c.ConnectionType == "BOT" {
+		if c.TenantID == tenantId && c.ConnectionType == "BOT" && c.Status == "ACTIVE" {
 			candidates = append(candidates, c)
 		}
 	}
@@ -325,28 +344,165 @@ func (h *Hub) handleIncomingEvent(client *Client, msg IncomingWSMessage) {
 	case "subscribe-event":
 		var data struct {
 			EventName string `json:"eventName"`
+			RequestID string `json:"requestId"`
 		}
 		if err := json.Unmarshal(msg.Data, &data); err != nil {
 			return
 		}
 		if data.EventName == "" {
-			h.sendError(client, "subscribe-event-error", "eventName in body required")
+			ackPayload := map[string]interface{}{
+				"event": "subscribe-event-ack",
+				"data": map[string]interface{}{
+					"requestId": data.RequestID,
+					"status":    "error",
+					"message":   "eventName in body required",
+				},
+			}
+			bytes, _ := json.Marshal(ackPayload)
+			select {
+			case client.Send <- bytes:
+			default:
+			}
 			return
 		}
 		h.subscribe(client, data.EventName)
 
+		ackPayload := map[string]interface{}{
+			"event": "subscribe-event-ack",
+			"data": map[string]interface{}{
+				"eventName": data.EventName,
+				"requestId": data.RequestID,
+				"status":    "success",
+			},
+		}
+		bytes, _ := json.Marshal(ackPayload)
+		select {
+		case client.Send <- bytes:
+		default:
+		}
+
 	case "unsubscribe-event":
 		var data struct {
 			EventName string `json:"eventName"`
+			RequestID string `json:"requestId"`
 		}
 		if err := json.Unmarshal(msg.Data, &data); err != nil {
 			return
 		}
 		if data.EventName == "" {
-			h.sendError(client, "unsubscribe-event-error", "eventName in body required")
+			ackPayload := map[string]interface{}{
+				"event": "unsubscribe-event-ack",
+				"data": map[string]interface{}{
+					"requestId": data.RequestID,
+					"status":    "error",
+					"message":   "eventName in body required",
+				},
+			}
+			bytes, _ := json.Marshal(ackPayload)
+			select {
+			case client.Send <- bytes:
+			default:
+			}
 			return
 		}
 		h.unsubscribe(client, data.EventName)
+
+		ackPayload := map[string]interface{}{
+			"event": "unsubscribe-event-ack",
+			"data": map[string]interface{}{
+				"eventName": data.EventName,
+				"requestId": data.RequestID,
+				"status":    "success",
+			},
+		}
+		bytes, _ := json.Marshal(ackPayload)
+		select {
+		case client.Send <- bytes:
+		default:
+		}
+
+	case "bot:status-change":
+		var data struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(msg.Data, &data); err != nil {
+			return
+		}
+		h.mutex.Lock()
+		client.Status = data.Status
+		tenantID := client.TenantID
+		h.mutex.Unlock()
+
+		h.BroadcastEvent("bot:list-update:"+tenantID, h.GetActiveBotsList(tenantID))
+
+	case "bot:log":
+		channel := fmt.Sprintf("bot:logs:%s:%s", client.TenantID, client.Name)
+		h.BroadcastEvent(channel, msg.Data)
+
+	case "bot:config-response", "bot:config-sync":
+		channel := fmt.Sprintf("bot:config:%s:%s", client.TenantID, client.Name)
+		h.BroadcastEvent(channel, msg.Data)
+
+	case "command:log", "command:input-request":
+		var data struct {
+			CommandID string `json:"commandId"`
+		}
+		if err := json.Unmarshal(msg.Data, &data); err != nil {
+			return
+		}
+		h.BroadcastEvent("command:status:"+data.CommandID, msg.Data)
+
+	case "command:input-response":
+		var data struct {
+			CommandID string `json:"commandId"`
+		}
+		if err := json.Unmarshal(msg.Data, &data); err != nil {
+			return
+		}
+		h.mutex.RLock()
+		botID, exists := h.taskBots[data.CommandID]
+		var bot *Client
+		if exists {
+			bot = h.clients[botID]
+		}
+		h.mutex.RUnlock()
+
+		if bot != nil {
+			rawMsg, err := json.Marshal(msg)
+			if err == nil {
+				select {
+				case bot.Send <- rawMsg:
+				default:
+				}
+			}
+		}
+
+	case "bot:config-request", "bot:config-update", "bot:standby", "bot:resume", "bot:restart":
+		var data struct {
+			BotName string `json:"botName"`
+		}
+		if err := json.Unmarshal(msg.Data, &data); err != nil {
+			return
+		}
+		h.mutex.RLock()
+		var bot *Client
+		for _, c := range h.clients {
+			if c.TenantID == client.TenantID && c.ConnectionType == "BOT" && c.Name == data.BotName {
+				bot = c
+				break
+			}
+		}
+		h.mutex.RUnlock()
+
+		if bot != nil {
+			rawMsg, err := json.Marshal(msg)
+			if err == nil {
+				select {
+				case bot.Send <- rawMsg:
+				default:
+				}
+			}
+		}
 	}
 }
 
@@ -392,6 +548,10 @@ func (h *Hub) unsubscribe(client *Client, eventName string) {
 }
 
 func (h *Hub) handleTaskAccepted(client *Client, taskId string) {
+	h.mutex.Lock()
+	h.taskBots[taskId] = client.ID
+	h.mutex.Unlock()
+
 	isDbTask := regexp.MustCompile(`^\d+$`).MatchString(taskId)
 	if isDbTask {
 		go func() {
@@ -419,6 +579,7 @@ func (h *Hub) handleTaskRejected(client *Client, taskId string, message string) 
 	if client.Inflight < 0 {
 		client.Inflight = 0
 	}
+	delete(h.taskBots, taskId)
 	h.mutex.Unlock()
 
 	isDbTask := regexp.MustCompile(`^\d+$`).MatchString(taskId)
@@ -449,6 +610,7 @@ func (h *Hub) handleTaskDone(client *Client, taskId string, status string, messa
 	if client.Inflight < 0 {
 		client.Inflight = 0
 	}
+	delete(h.taskBots, taskId)
 	h.mutex.Unlock()
 
 	isDbTask := regexp.MustCompile(`^\d+$`).MatchString(taskId)
@@ -471,4 +633,61 @@ func (h *Hub) handleTaskDone(client *Client, taskId string, status string, messa
 		"status":        status,
 		"error_message": message,
 	})
+
+	h.BroadcastEvent("command:status:"+taskId, map[string]interface{}{
+		"event":         "task-done",
+		"taskId":        taskId,
+		"status":        status,
+		"error_message": message,
+	})
+}
+
+type BotInfo struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	TenantID    string `json:"tenantId"`
+	Status      string `json:"status"`
+	ConnectedAt int64  `json:"connectedAt"`
+	Inflight    int    `json:"inflightTasks"`
+}
+
+func (h *Hub) GetActiveBotsList(tenantID string) []BotInfo {
+	h.mutex.RLock()
+	defer h.mutex.RUnlock()
+
+	var bots []BotInfo
+	for _, c := range h.clients {
+		if c.TenantID == tenantID && c.ConnectionType == "BOT" {
+			status := c.Status
+			if status == "" {
+				status = "ACTIVE"
+			}
+			bots = append(bots, BotInfo{
+				ID:          c.ID,
+				Name:        c.Name,
+				TenantID:    c.TenantID,
+				Status:      status,
+				ConnectedAt: c.ConnectedAt,
+				Inflight:    c.Inflight,
+			})
+		}
+	}
+	return bots
+}
+
+func (h *Hub) ForwardToBot(tenantID string, botName string, message []byte) error {
+	h.mutex.RLock()
+	defer h.mutex.RUnlock()
+
+	for _, c := range h.clients {
+		if c.TenantID == tenantID && c.ConnectionType == "BOT" && c.Name == botName {
+			select {
+			case c.Send <- message:
+				return nil
+			default:
+				return fmt.Errorf("bot connection send buffer full")
+			}
+		}
+	}
+	return fmt.Errorf("bot '%s' is not connected", botName)
 }

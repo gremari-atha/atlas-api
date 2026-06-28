@@ -1,0 +1,14 @@
+CREATE TABLE botlog_ts (
+    id BIGINT GENERATED ALWAYS AS IDENTITY,
+    bot_name VARCHAR NOT NULL,
+    tenant_id VARCHAR NOT NULL REFERENCES tenant(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    level VARCHAR NOT NULL,
+    message TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+    PRIMARY KEY (id, created_at)
+);
+
+SELECT create_hypertable('botlog_ts', 'created_at');
+SELECT add_retention_policy('botlog_ts', INTERVAL '3 days');
+
+CREATE INDEX idx_botlog_ts_tenant_bot_time ON botlog_ts (tenant_id, bot_name, created_at DESC);

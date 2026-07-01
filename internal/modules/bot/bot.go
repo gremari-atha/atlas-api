@@ -1,6 +1,9 @@
 package bot
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -47,6 +50,8 @@ func (h *BotHandler) RegisterRoutes(r chi.Router, auth *middleware.AuthMiddlewar
 		r.Post("/restart", h.PostRestart)
 		r.Post("/log", h.PostLog)
 		r.Get("/log", h.GetLog)
+		r.Get("/api-key", h.GetAPIKey)
+		r.Post("/api-key", h.GenerateAPIKey)
 	})
 }
 
@@ -66,7 +71,7 @@ func (h *BotHandler) GetActive(w http.ResponseWriter, r *http.Request) {
 func (h *BotHandler) PostStandby(w http.ResponseWriter, r *http.Request) {
 	var req BotCommandRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, http.StatusBadRequest, "invalid request body")
+		response.Error(w, http.StatusBadRequest, "invalid request body", err)
 		return
 	}
 	if req.BotName == "" {
@@ -84,7 +89,7 @@ func (h *BotHandler) PostStandby(w http.ResponseWriter, r *http.Request) {
 	bytes, _ := json.Marshal(msg)
 
 	if err := h.wsHub.ForwardToBot(uCtx.TenantID, req.BotName, bytes); err != nil {
-		response.Error(w, http.StatusNotFound, err.Error())
+		response.Error(w, http.StatusNotFound, err.Error(), err)
 		return
 	}
 
@@ -94,7 +99,7 @@ func (h *BotHandler) PostStandby(w http.ResponseWriter, r *http.Request) {
 func (h *BotHandler) PostResume(w http.ResponseWriter, r *http.Request) {
 	var req BotCommandRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, http.StatusBadRequest, "invalid request body")
+		response.Error(w, http.StatusBadRequest, "invalid request body", err)
 		return
 	}
 	if req.BotName == "" {
@@ -112,7 +117,7 @@ func (h *BotHandler) PostResume(w http.ResponseWriter, r *http.Request) {
 	bytes, _ := json.Marshal(msg)
 
 	if err := h.wsHub.ForwardToBot(uCtx.TenantID, req.BotName, bytes); err != nil {
-		response.Error(w, http.StatusNotFound, err.Error())
+		response.Error(w, http.StatusNotFound, err.Error(), err)
 		return
 	}
 
@@ -122,7 +127,7 @@ func (h *BotHandler) PostResume(w http.ResponseWriter, r *http.Request) {
 func (h *BotHandler) PostRestart(w http.ResponseWriter, r *http.Request) {
 	var req BotCommandRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, http.StatusBadRequest, "invalid request body")
+		response.Error(w, http.StatusBadRequest, "invalid request body", err)
 		return
 	}
 	if req.BotName == "" {
@@ -140,7 +145,7 @@ func (h *BotHandler) PostRestart(w http.ResponseWriter, r *http.Request) {
 	bytes, _ := json.Marshal(msg)
 
 	if err := h.wsHub.ForwardToBot(uCtx.TenantID, req.BotName, bytes); err != nil {
-		response.Error(w, http.StatusNotFound, err.Error())
+		response.Error(w, http.StatusNotFound, err.Error(), err)
 		return
 	}
 
@@ -150,7 +155,7 @@ func (h *BotHandler) PostRestart(w http.ResponseWriter, r *http.Request) {
 func (h *BotHandler) PostLog(w http.ResponseWriter, r *http.Request) {
 	var req BotLogRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, http.StatusBadRequest, "invalid request body")
+		response.Error(w, http.StatusBadRequest, "invalid request body", err)
 		return
 	}
 	if req.BotName == "" || req.Level == "" || req.Message == "" {
@@ -172,7 +177,7 @@ func (h *BotHandler) PostLog(w http.ResponseWriter, r *http.Request) {
 	// Async fire-and-forget db insertion to prevent blocking the bot
 	go func() {
 		_, err := h.dbPool.Exec(
-			r.Context(),
+			context.Background(),
 			"INSERT INTO master.botlog_ts (bot_name, tenant_id, level, message, created_at) VALUES ($1, $2, $3, $4, $5)",
 			req.BotName, uCtx.TenantID, req.Level, req.Message, createdAt,
 		)
@@ -226,7 +231,7 @@ func (h *BotHandler) GetLog(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		slog.Error("failed to query bot logs from database", "bot", botName, "tenant", uCtx.TenantID, "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to query logs")
+		response.Error(w, http.StatusInternalServerError, "failed to query logs", err)
 		return
 	}
 	defer rows.Close()
@@ -245,7 +250,7 @@ func (h *BotHandler) GetLog(w http.ResponseWriter, r *http.Request) {
 		err := rows.Scan(&l.ID, &l.BotName, &l.Level, &l.Message, &l.CreatedAt)
 		if err != nil {
 			slog.Error("failed to scan bot log row", "err", err)
-			response.Error(w, http.StatusInternalServerError, "failed to scan logs")
+			response.Error(w, http.StatusInternalServerError, "failed to scan logs", err)
 			return
 		}
 		logs = append(logs, l)
@@ -257,5 +262,60 @@ func (h *BotHandler) GetLog(w http.ResponseWriter, r *http.Request) {
 			"page":  page,
 			"limit": limit,
 		},
+	})
+}
+
+func (h *BotHandler) GetAPIKey(w http.ResponseWriter, r *http.Request) {
+	uCtx, ok := middleware.GetUserContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var apiKey *string
+	err := h.dbPool.QueryRow(r.Context(), "SELECT api_key FROM master.tenant WHERE id = $1", uCtx.TenantID).Scan(&apiKey)
+	if err != nil {
+		slog.Error("failed to query api_key", "tenant_id", uCtx.TenantID, "err", err)
+		response.Error(w, http.StatusInternalServerError, "failed to fetch API key", err)
+		return
+	}
+
+	val := ""
+	if apiKey != nil {
+		val = *apiKey
+	}
+
+	response.JSON(w, http.StatusOK, map[string]string{
+		"apiKey": val,
+	})
+}
+
+func (h *BotHandler) GenerateAPIKey(w http.ResponseWriter, r *http.Request) {
+	uCtx, ok := middleware.GetUserContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	// Generate 32-byte secure random string
+	b := make([]byte, 32)
+	_, err := rand.Read(b)
+	if err != nil {
+		slog.Error("failed to generate secure bytes", "err", err)
+		response.Error(w, http.StatusInternalServerError, "failed to generate API key", err)
+		return
+	}
+	newAPIKey := hex.EncodeToString(b)
+
+	// Update tenant table with new api_key
+	_, err = h.dbPool.Exec(r.Context(), "UPDATE master.tenant SET api_key = $1, updated_at = NOW() WHERE id = $2", newAPIKey, uCtx.TenantID)
+	if err != nil {
+		slog.Error("failed to update api_key in tenant", "tenant_id", uCtx.TenantID, "err", err)
+		response.Error(w, http.StatusInternalServerError, "failed to save API key", err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, map[string]string{
+		"apiKey": newAPIKey,
 	})
 }

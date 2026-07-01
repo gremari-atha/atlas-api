@@ -62,17 +62,19 @@ func StructuredLogger(next http.Handler) http.Handler {
 		}
 
 		defer func() {
+			if ww.status < 400 {
+				return // Silence success access logs to save data storage
+			}
+
 			latency := time.Since(start)
 			reqID := middleware.GetReqID(r.Context())
 
 			// Extract tenant and role from headers/token unverified to log it with context
 			tenantID, role := extractTenantAndRole(r)
 
-			level := slog.LevelInfo
+			level := slog.LevelWarn
 			if ww.status >= 500 {
 				level = slog.LevelError
-			} else if ww.status >= 400 {
-				level = slog.LevelWarn
 			}
 
 			slog.Log(

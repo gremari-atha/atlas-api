@@ -31,19 +31,22 @@ type ProductVariant struct {
 	Interval     int64     `json:"interval"`
 	Cooldown     int64     `json:"cooldown"`
 	CopyTemplate *string   `json:"copy_template"`
+	BasePrice    int64     `json:"base_price"`
 	ProductID    int64     `json:"product_id,string"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	Product      *Product  `json:"product,omitempty"`
 }
 
 type PlatformProduct struct {
-	ID               int64     `json:"id,string"`
-	Platform         string    `json:"platform"`
-	Name             string    `json:"name"`
-	Variant          *string   `json:"variant"`
-	ProductVariantID int64     `json:"product_variant_id,string"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID               int64           `json:"id,string"`
+	Platform         string          `json:"platform"`
+	Name             string          `json:"name"`
+	Variant          *string         `json:"variant"`
+	ProductVariantID int64           `json:"product_variant_id,string"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+	ProductVariant   *ProductVariant `json:"product_variant,omitempty"`
 }
 
 // Payloads
@@ -62,6 +65,7 @@ type CreateVariantNested struct {
 	Interval     int64   `json:"interval" validate:"required"`
 	Cooldown     int64   `json:"cooldown" validate:"required"`
 	CopyTemplate *string `json:"copy_template"`
+	BasePrice    int64   `json:"base_price"`
 }
 
 type CreateVariantPayload struct {
@@ -70,6 +74,7 @@ type CreateVariantPayload struct {
 	Interval     int64   `json:"interval" validate:"required"`
 	Cooldown     int64   `json:"cooldown" validate:"required"`
 	CopyTemplate *string `json:"copy_template"`
+	BasePrice    int64   `json:"base_price"`
 	ProductID    int64   `json:"product_id,string" validate:"required"`
 }
 
@@ -83,6 +88,7 @@ type UpdateVariantPayload struct {
 	Interval     *int64  `json:"interval"`
 	Cooldown     *int64  `json:"cooldown"`
 	CopyTemplate *string `json:"copy_template"`
+	BasePrice    *int64  `json:"base_price"`
 }
 
 type CreatePlatformProductPayload struct {
@@ -179,7 +185,7 @@ func (h *ProductHandler) FindAllProducts(w http.ResponseWriter, r *http.Request)
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
 		slog.Error("failed to count products", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
@@ -195,7 +201,7 @@ func (h *ProductHandler) FindAllProducts(w http.ResponseWriter, r *http.Request)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
 		slog.Error("failed to query products", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()
@@ -216,7 +222,7 @@ func (h *ProductHandler) FindAllProducts(w http.ResponseWriter, r *http.Request)
 		}
 
 		vRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
-			SELECT id, name, duration, interval, cooldown, copy_template, product_id, created_at, updated_at
+			SELECT id, name, duration, interval, cooldown, copy_template, base_price, product_id, created_at, updated_at
 			FROM "%s".product_variant
 			WHERE product_id = ANY($1)
 			ORDER BY name ASC
@@ -226,7 +232,7 @@ func (h *ProductHandler) FindAllProducts(w http.ResponseWriter, r *http.Request)
 			variantMap := make(map[int64][]ProductVariant)
 			for vRows.Next() {
 				var v ProductVariant
-				if err := vRows.Scan(&v.ID, &v.Name, &v.Duration, &v.Interval, &v.Cooldown, &v.CopyTemplate, &v.ProductID, &v.CreatedAt, &v.UpdatedAt); err == nil {
+				if err := vRows.Scan(&v.ID, &v.Name, &v.Duration, &v.Interval, &v.Cooldown, &v.CopyTemplate, &v.BasePrice, &v.ProductID, &v.CreatedAt, &v.UpdatedAt); err == nil {
 					variantMap[v.ProductID] = append(variantMap[v.ProductID], v)
 				}
 			}
@@ -255,12 +261,12 @@ func (h *ProductHandler) FindOneProduct(w http.ResponseWriter, r *http.Request) 
 	`, tenantID), id).Scan(&p.ID, &p.Name, &p.CreatedAt, &p.UpdatedAt)
 
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("product dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("product dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
 	vRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
-		SELECT id, name, duration, interval, cooldown, copy_template, created_at, updated_at
+		SELECT id, name, duration, interval, cooldown, copy_template, base_price, created_at, updated_at
 		FROM "%s".product_variant
 		WHERE product_id = $1
 		ORDER BY name ASC
@@ -270,7 +276,7 @@ func (h *ProductHandler) FindOneProduct(w http.ResponseWriter, r *http.Request) 
 		variants := []ProductVariant{}
 		for vRows.Next() {
 			var v ProductVariant
-			if err := vRows.Scan(&v.ID, &v.Name, &v.Duration, &v.Interval, &v.Cooldown, &v.CopyTemplate, &v.CreatedAt, &v.UpdatedAt); err == nil {
+			if err := vRows.Scan(&v.ID, &v.Name, &v.Duration, &v.Interval, &v.Cooldown, &v.CopyTemplate, &v.BasePrice, &v.CreatedAt, &v.UpdatedAt); err == nil {
 				v.ProductID = id
 				variants = append(variants, v)
 			}
@@ -305,7 +311,7 @@ func (h *ProductHandler) CreateProduct(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		slog.Error("failed to insert product", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to insert product")
+		response.Error(w, http.StatusInternalServerError, "failed to insert product", err)
 		return
 	}
 
@@ -320,7 +326,7 @@ func (h *ProductHandler) CreateProductWithVariant(w http.ResponseWriter, r *http
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
 		slog.Error("failed to start transaction to create product with variants", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -342,7 +348,7 @@ func (h *ProductHandler) CreateProductWithVariant(w http.ResponseWriter, r *http
 	`, tenantID), payload.Name).Scan(&p.ID, &p.Name, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		slog.Error("failed to insert product within transaction", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to insert product")
+		response.Error(w, http.StatusInternalServerError, "failed to insert product", err)
 		return
 	}
 
@@ -351,15 +357,15 @@ func (h *ProductHandler) CreateProductWithVariant(w http.ResponseWriter, r *http
 	for _, v := range payload.Variants {
 		var pv ProductVariant
 		err = tx.QueryRow(r.Context(), fmt.Sprintf(`
-			INSERT INTO "%s".product_variant (name, duration, interval, cooldown, copy_template, product_id, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
-			RETURNING id, name, duration, interval, cooldown, copy_template, product_id, created_at, updated_at
-		`, tenantID), v.Name, v.Duration, v.Interval, v.Cooldown, v.CopyTemplate, p.ID).Scan(
-			&pv.ID, &pv.Name, &pv.Duration, &pv.Interval, &pv.Cooldown, &pv.CopyTemplate, &pv.ProductID, &pv.CreatedAt, &pv.UpdatedAt,
+			INSERT INTO "%s".product_variant (name, duration, interval, cooldown, copy_template, base_price, product_id, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+			RETURNING id, name, duration, interval, cooldown, copy_template, base_price, product_id, created_at, updated_at
+		`, tenantID), v.Name, v.Duration, v.Interval, v.Cooldown, v.CopyTemplate, v.BasePrice, p.ID).Scan(
+			&pv.ID, &pv.Name, &pv.Duration, &pv.Interval, &pv.Cooldown, &pv.CopyTemplate, &pv.BasePrice, &pv.ProductID, &pv.CreatedAt, &pv.UpdatedAt,
 		)
 		if err != nil {
 			slog.Error("failed to insert product variant within transaction", "err", err)
-			response.Error(w, http.StatusInternalServerError, "failed to insert variants")
+			response.Error(w, http.StatusInternalServerError, "failed to insert variants", err)
 			return
 		}
 		variants = append(variants, pv)
@@ -367,7 +373,7 @@ func (h *ProductHandler) CreateProductWithVariant(w http.ResponseWriter, r *http
 
 	if err := tx.Commit(r.Context()); err != nil {
 		slog.Error("failed to commit transaction to create product with variants", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -390,7 +396,7 @@ func (h *ProductHandler) UpdateProduct(w http.ResponseWriter, r *http.Request) {
 	`, tenantID), payload.Name, id).Scan(&p.ID, &p.Name, &p.CreatedAt, &p.UpdatedAt)
 
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("product dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("product dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
@@ -405,7 +411,7 @@ func (h *ProductHandler) RemoveProduct(w http.ResponseWriter, r *http.Request) {
 	res, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".product WHERE id = $1`, tenantID), id)
 	if err != nil {
 		slog.Error("failed to delete product", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to delete product")
+		response.Error(w, http.StatusInternalServerError, "failed to delete product", err)
 		return
 	}
 
@@ -433,32 +439,34 @@ func (h *ProductHandler) FindAllVariants(w http.ResponseWriter, r *http.Request)
 	var args []interface{}
 	if productFilter != "" {
 		pID, _ := strconv.ParseInt(productFilter, 10, 64)
-		whereClause = "WHERE product_id = $1"
+		whereClause = "WHERE pv.product_id = $1"
 		args = append(args, pID)
 	}
 
-	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".product_variant %s`, tenantID, whereClause)
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".product_variant pv %s`, tenantID, whereClause)
 	var total int64
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
 		slog.Error("failed to count product variants", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, name, duration, interval, cooldown, copy_template, product_id, created_at, updated_at
-		FROM "%s".product_variant
+		SELECT pv.id, pv.name, pv.duration, pv.interval, pv.cooldown, pv.copy_template, pv.base_price, pv.product_id, pv.created_at, pv.updated_at,
+		       p.name AS product_name
+		FROM "%s".product_variant pv
+		LEFT JOIN "%s".product p ON pv.product_id = p.id
 		%s
-		ORDER BY name ASC
+		ORDER BY pv.name ASC
 		LIMIT $%d OFFSET $%d
-	`, tenantID, whereClause, len(args)+1, len(args)+2)
+	`, tenantID, tenantID, whereClause, len(args)+1, len(args)+2)
 
 	selectArgs := append(args, limit, offset)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
 		slog.Error("failed to query product variants", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()
@@ -466,11 +474,18 @@ func (h *ProductHandler) FindAllVariants(w http.ResponseWriter, r *http.Request)
 	var variants []ProductVariant
 	for rows.Next() {
 		var v ProductVariant
-		err = rows.Scan(&v.ID, &v.Name, &v.Duration, &v.Interval, &v.Cooldown, &v.CopyTemplate, &v.ProductID, &v.CreatedAt, &v.UpdatedAt)
+		var productName *string
+		err = rows.Scan(&v.ID, &v.Name, &v.Duration, &v.Interval, &v.Cooldown, &v.CopyTemplate, &v.BasePrice, &v.ProductID, &v.CreatedAt, &v.UpdatedAt, &productName)
 		if err != nil {
 			slog.Error("failed to scan product variant row", "err", err)
-			response.Error(w, http.StatusInternalServerError, "database scan failed")
+			response.Error(w, http.StatusInternalServerError, "database scan failed", err)
 			return
+		}
+		if productName != nil {
+			v.Product = &Product{
+				ID:   v.ProductID,
+				Name: *productName,
+			}
 		}
 		variants = append(variants, v)
 	}
@@ -484,14 +499,25 @@ func (h *ProductHandler) FindOneVariant(w http.ResponseWriter, r *http.Request) 
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 
 	var v ProductVariant
+	var productName *string
 	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT id, name, duration, interval, cooldown, copy_template, product_id, created_at, updated_at
-		FROM "%s".product_variant WHERE id = $1
-	`, tenantID), id).Scan(&v.ID, &v.Name, &v.Duration, &v.Interval, &v.Cooldown, &v.CopyTemplate, &v.ProductID, &v.CreatedAt, &v.UpdatedAt)
+		SELECT pv.id, pv.name, pv.duration, pv.interval, pv.cooldown, pv.copy_template, pv.base_price, pv.product_id, pv.created_at, pv.updated_at,
+		       p.name AS product_name
+		FROM "%s".product_variant pv
+		LEFT JOIN "%s".product p ON pv.product_id = p.id
+		WHERE pv.id = $1
+	`, tenantID, tenantID), id).Scan(&v.ID, &v.Name, &v.Duration, &v.Interval, &v.Cooldown, &v.CopyTemplate, &v.BasePrice, &v.ProductID, &v.CreatedAt, &v.UpdatedAt, &productName)
 
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("productVariant dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("productVariant dengan id: %d tidak ditemukan", id), err)
 		return
+	}
+
+	if productName != nil {
+		v.Product = &Product{
+			ID:   v.ProductID,
+			Name: *productName,
+		}
 	}
 
 	response.JSON(w, http.StatusOK, v)
@@ -512,16 +538,16 @@ func (h *ProductHandler) CreateVariant(w http.ResponseWriter, r *http.Request) {
 
 	var v ProductVariant
 	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		INSERT INTO "%s".product_variant (name, duration, interval, cooldown, copy_template, product_id, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
-		RETURNING id, name, duration, interval, cooldown, copy_template, product_id, created_at, updated_at
-	`, tenantID), payload.Name, payload.Duration, payload.Interval, payload.Cooldown, payload.CopyTemplate, payload.ProductID).Scan(
-		&v.ID, &v.Name, &v.Duration, &v.Interval, &v.Cooldown, &v.CopyTemplate, &v.ProductID, &v.CreatedAt, &v.UpdatedAt,
+		INSERT INTO "%s".product_variant (name, duration, interval, cooldown, copy_template, base_price, product_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+		RETURNING id, name, duration, interval, cooldown, copy_template, base_price, product_id, created_at, updated_at
+	`, tenantID), payload.Name, payload.Duration, payload.Interval, payload.Cooldown, payload.CopyTemplate, payload.BasePrice, payload.ProductID).Scan(
+		&v.ID, &v.Name, &v.Duration, &v.Interval, &v.Cooldown, &v.CopyTemplate, &v.BasePrice, &v.ProductID, &v.CreatedAt, &v.UpdatedAt,
 	)
 
 	if err != nil {
 		slog.Error("failed to insert product variant", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to insert variant")
+		response.Error(w, http.StatusInternalServerError, "failed to insert variant", err)
 		return
 	}
 
@@ -537,7 +563,7 @@ func (h *ProductHandler) UpdateVariant(w http.ResponseWriter, r *http.Request) {
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
 		slog.Error("failed to start transaction to update variant", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -572,6 +598,11 @@ func (h *ProductHandler) UpdateVariant(w http.ResponseWriter, r *http.Request) {
 		args = append(args, *payload.CopyTemplate)
 		argIdx++
 	}
+	if payload.BasePrice != nil {
+		query += fmt.Sprintf("base_price = $%d, ", argIdx)
+		args = append(args, *payload.BasePrice)
+		argIdx++
+	}
 
 	query += "updated_at = NOW() "
 	query += fmt.Sprintf("WHERE id = $%d", argIdx)
@@ -580,7 +611,7 @@ func (h *ProductHandler) UpdateVariant(w http.ResponseWriter, r *http.Request) {
 	res, err := tx.Exec(r.Context(), query, args...)
 	if err != nil {
 		slog.Error("failed to update variant", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to update variant")
+		response.Error(w, http.StatusInternalServerError, "failed to update variant", err)
 		return
 	}
 
@@ -591,15 +622,15 @@ func (h *ProductHandler) UpdateVariant(w http.ResponseWriter, r *http.Request) {
 
 	if err := tx.Commit(r.Context()); err != nil {
 		slog.Error("failed to commit transaction to update variant", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
 	var v ProductVariant
 	_ = h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT id, name, duration, interval, cooldown, copy_template, product_id, created_at, updated_at
+		SELECT id, name, duration, interval, cooldown, copy_template, base_price, product_id, created_at, updated_at
 		FROM "%s".product_variant WHERE id = $1
-	`, tenantID), id).Scan(&v.ID, &v.Name, &v.Duration, &v.Interval, &v.Cooldown, &v.CopyTemplate, &v.ProductID, &v.CreatedAt, &v.UpdatedAt)
+	`, tenantID), id).Scan(&v.ID, &v.Name, &v.Duration, &v.Interval, &v.Cooldown, &v.CopyTemplate, &v.BasePrice, &v.ProductID, &v.CreatedAt, &v.UpdatedAt)
 
 	response.JSON(w, http.StatusOK, v)
 }
@@ -612,7 +643,7 @@ func (h *ProductHandler) RemoveVariant(w http.ResponseWriter, r *http.Request) {
 	res, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".product_variant WHERE id = $1`, tenantID), id)
 	if err != nil {
 		slog.Error("failed to delete product variant", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to delete variant")
+		response.Error(w, http.StatusInternalServerError, "failed to delete variant", err)
 		return
 	}
 
@@ -644,23 +675,23 @@ func (h *ProductHandler) FindAllPlatformProducts(w http.ResponseWriter, r *http.
 	argIdx := 1
 
 	if nameFilter != "" {
-		conditions = append(conditions, fmt.Sprintf("name ILIKE $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf("pp.name ILIKE $%d", argIdx))
 		args = append(args, "%"+nameFilter+"%")
 		argIdx++
 	}
 	if platformFilter != "" {
-		conditions = append(conditions, fmt.Sprintf("platform ILIKE $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf("pp.platform ILIKE $%d", argIdx))
 		args = append(args, "%"+platformFilter+"%")
 		argIdx++
 	}
 	if variantFilter != "" {
-		conditions = append(conditions, fmt.Sprintf("variant ILIKE $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf("pp.variant ILIKE $%d", argIdx))
 		args = append(args, "%"+variantFilter+"%")
 		argIdx++
 	}
 	if pvFilter != "" {
 		pvID, _ := strconv.ParseInt(pvFilter, 10, 64)
-		conditions = append(conditions, fmt.Sprintf("product_variant_id = $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf("pp.product_variant_id = $%d", argIdx))
 		args = append(args, pvID)
 		argIdx++
 	}
@@ -670,28 +701,32 @@ func (h *ProductHandler) FindAllPlatformProducts(w http.ResponseWriter, r *http.
 		whereClause = "WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".platform_product %s`, tenantID, whereClause)
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".platform_product pp %s`, tenantID, whereClause)
 	var total int64
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
 		slog.Error("failed to count platform products", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, platform, name, variant, product_variant_id, created_at, updated_at
-		FROM "%s".platform_product
+		SELECT pp.id, pp.platform, pp.name, pp.variant, pp.product_variant_id, pp.created_at, pp.updated_at,
+		       pv.id, pv.name, pv.duration, pv.interval, pv.cooldown, pv.copy_template, pv.base_price, pv.product_id, pv.created_at, pv.updated_at,
+		       p.id, p.name
+		FROM "%s".platform_product pp
+		LEFT JOIN "%s".product_variant pv ON pp.product_variant_id = pv.id
+		LEFT JOIN "%s".product p ON pv.product_id = p.id
 		%s
-		ORDER BY name ASC
+		ORDER BY pp.name ASC
 		LIMIT $%d OFFSET $%d
-	`, tenantID, whereClause, argIdx, argIdx+1)
+	`, tenantID, tenantID, tenantID, whereClause, argIdx, argIdx+1)
 
 	selectArgs := append(args, limit, offset)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
 		slog.Error("failed to query platform products", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()
@@ -699,12 +734,20 @@ func (h *ProductHandler) FindAllPlatformProducts(w http.ResponseWriter, r *http.
 	var pps []PlatformProduct
 	for rows.Next() {
 		var pp PlatformProduct
-		err = rows.Scan(&pp.ID, &pp.Platform, &pp.Name, &pp.Variant, &pp.ProductVariantID, &pp.CreatedAt, &pp.UpdatedAt)
+		var pv ProductVariant
+		var p Product
+		err = rows.Scan(
+			&pp.ID, &pp.Platform, &pp.Name, &pp.Variant, &pp.ProductVariantID, &pp.CreatedAt, &pp.UpdatedAt,
+			&pv.ID, &pv.Name, &pv.Duration, &pv.Interval, &pv.Cooldown, &pv.CopyTemplate, &pv.BasePrice, &pv.ProductID, &pv.CreatedAt, &pv.UpdatedAt,
+			&p.ID, &p.Name,
+		)
 		if err != nil {
 			slog.Error("failed to scan platform product row", "err", err)
-			response.Error(w, http.StatusInternalServerError, "database scan failed")
+			response.Error(w, http.StatusInternalServerError, "database scan failed", err)
 			return
 		}
+		pv.Product = &p
+		pp.ProductVariant = &pv
 		pps = append(pps, pp)
 	}
 
@@ -717,15 +760,29 @@ func (h *ProductHandler) FindOnePlatformProduct(w http.ResponseWriter, r *http.R
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 
 	var pp PlatformProduct
+	var pv ProductVariant
+	var p Product
 	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT id, platform, name, variant, product_variant_id, created_at, updated_at
-		FROM "%s".platform_product WHERE id = $1
-	`, tenantID), id).Scan(&pp.ID, &pp.Platform, &pp.Name, &pp.Variant, &pp.ProductVariantID, &pp.CreatedAt, &pp.UpdatedAt)
+		SELECT pp.id, pp.platform, pp.name, pp.variant, pp.product_variant_id, pp.created_at, pp.updated_at,
+		       pv.id, pv.name, pv.duration, pv.interval, pv.cooldown, pv.copy_template, pv.base_price, pv.product_id, pv.created_at, pv.updated_at,
+		       p.id, p.name
+		FROM "%s".platform_product pp
+		LEFT JOIN "%s".product_variant pv ON pp.product_variant_id = pv.id
+		LEFT JOIN "%s".product p ON pv.product_id = p.id
+		WHERE pp.id = $1
+	`, tenantID, tenantID, tenantID), id).Scan(
+		&pp.ID, &pp.Platform, &pp.Name, &pp.Variant, &pp.ProductVariantID, &pp.CreatedAt, &pp.UpdatedAt,
+		&pv.ID, &pv.Name, &pv.Duration, &pv.Interval, &pv.Cooldown, &pv.CopyTemplate, &pv.BasePrice, &pv.ProductID, &pv.CreatedAt, &pv.UpdatedAt,
+		&p.ID, &p.Name,
+	)
 
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("platformProduct dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("platformProduct dengan id: %d tidak ditemukan", id), err)
 		return
 	}
+
+	pv.Product = &p
+	pp.ProductVariant = &pv
 
 	response.JSON(w, http.StatusOK, pp)
 }
@@ -771,20 +828,44 @@ func (h *ProductHandler) CreatePlatformProduct(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	var pp PlatformProduct
+	var newID int64
+	var createdAt, updatedAt time.Time
 	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
 		INSERT INTO "%s".platform_product (platform, name, variant, product_variant_id, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, NOW(), NOW())
-		RETURNING id, platform, name, variant, product_variant_id, created_at, updated_at
-	`, tenantID), payload.Platform, payload.Name, normalizedVariant, payload.ProductVariantID).Scan(
+		RETURNING id, created_at, updated_at
+	`, tenantID), payload.Platform, payload.Name, payload.Variant, payload.ProductVariantID).Scan(&newID, &createdAt, &updatedAt)
+	if err != nil {
+		slog.Error("failed to insert platform product", "err", err)
+		response.Error(w, http.StatusInternalServerError, "failed to insert platform product", err)
+		return
+	}
+
+	var pp PlatformProduct
+	var pv ProductVariant
+	var p Product
+	err = h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT pp.id, pp.platform, pp.name, pp.variant, pp.product_variant_id, pp.created_at, pp.updated_at,
+		       pv.id, pv.name, pv.duration, pv.interval, pv.cooldown, pv.copy_template, pv.base_price, pv.product_id, pv.created_at, pv.updated_at,
+		       p.id, p.name
+		FROM "%s".platform_product pp
+		LEFT JOIN "%s".product_variant pv ON pp.product_variant_id = pv.id
+		LEFT JOIN "%s".product p ON pv.product_id = p.id
+		WHERE pp.id = $1
+	`, tenantID, tenantID, tenantID), newID).Scan(
 		&pp.ID, &pp.Platform, &pp.Name, &pp.Variant, &pp.ProductVariantID, &pp.CreatedAt, &pp.UpdatedAt,
+		&pv.ID, &pv.Name, &pv.Duration, &pv.Interval, &pv.Cooldown, &pv.CopyTemplate, &pv.BasePrice, &pv.ProductID, &pv.CreatedAt, &pv.UpdatedAt,
+		&p.ID, &p.Name,
 	)
 
 	if err != nil {
-		slog.Error("failed to insert platform product", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to insert platform product")
+		slog.Error("failed to fetch created platform product", "err", err)
+		response.Error(w, http.StatusInternalServerError, "failed to fetch platform product", err)
 		return
 	}
+
+	pv.Product = &p
+	pp.ProductVariant = &pv
 
 	response.JSON(w, http.StatusCreated, pp)
 }
@@ -803,14 +884,14 @@ func (h *ProductHandler) UpdatePlatformProduct(w http.ResponseWriter, r *http.Re
 		SELECT name, platform, variant, product_variant_id FROM "%s".platform_product WHERE id = $1
 	`, tenantID), id).Scan(&currentName, &currentPlatform, &currentVariant, &currentPV)
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("platformProduct dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("platformProduct dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
 		slog.Error("failed to start transaction to update platform product", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -882,21 +963,36 @@ func (h *ProductHandler) UpdatePlatformProduct(w http.ResponseWriter, r *http.Re
 	_, err = tx.Exec(r.Context(), query, args...)
 	if err != nil {
 		slog.Error("failed to update platform product", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to update platform product")
+		response.Error(w, http.StatusInternalServerError, "failed to update platform product", err)
 		return
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
 		slog.Error("failed to commit transaction to update platform product", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
 	var pp PlatformProduct
-	_ = h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT id, platform, name, variant, product_variant_id, created_at, updated_at
-		FROM "%s".platform_product WHERE id = $1
-	`, tenantID), id).Scan(&pp.ID, &pp.Platform, &pp.Name, &pp.Variant, &pp.ProductVariantID, &pp.CreatedAt, &pp.UpdatedAt)
+	var pv ProductVariant
+	var p Product
+	err = h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT pp.id, pp.platform, pp.name, pp.variant, pp.product_variant_id, pp.created_at, pp.updated_at,
+		       pv.id, pv.name, pv.duration, pv.interval, pv.cooldown, pv.copy_template, pv.base_price, pv.product_id, pv.created_at, pv.updated_at,
+		       p.id, p.name
+		FROM "%s".platform_product pp
+		LEFT JOIN "%s".product_variant pv ON pp.product_variant_id = pv.id
+		LEFT JOIN "%s".product p ON pv.product_id = p.id
+		WHERE pp.id = $1
+	`, tenantID, tenantID, tenantID), id).Scan(
+		&pp.ID, &pp.Platform, &pp.Name, &pp.Variant, &pp.ProductVariantID, &pp.CreatedAt, &pp.UpdatedAt,
+		&pv.ID, &pv.Name, &pv.Duration, &pv.Interval, &pv.Cooldown, &pv.CopyTemplate, &pv.BasePrice, &pv.ProductID, &pv.CreatedAt, &pv.UpdatedAt,
+		&p.ID, &p.Name,
+	)
+	if err == nil {
+		pv.Product = &p
+		pp.ProductVariant = &pv
+	}
 
 	response.JSON(w, http.StatusOK, pp)
 }
@@ -909,7 +1005,7 @@ func (h *ProductHandler) RemovePlatformProduct(w http.ResponseWriter, r *http.Re
 	res, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".platform_product WHERE id = $1`, tenantID), id)
 	if err != nil {
 		slog.Error("failed to delete platform product", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to delete platform product")
+		response.Error(w, http.StatusInternalServerError, "failed to delete platform product", err)
 		return
 	}
 
@@ -1009,7 +1105,7 @@ func (h *ProductHandler) ByNames(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.dbPool.Query(r.Context(), query, payload.Platform, payload.Names)
 	if err != nil {
 		slog.Error("failed to query platform products by names", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()

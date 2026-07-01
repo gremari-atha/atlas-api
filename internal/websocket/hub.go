@@ -117,41 +117,54 @@ func (h *Hub) AuthenticateAndUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Decode token unverified to extract tenant_id
-	claims := jwt.MapClaims{}
-	parser := jwt.NewParser()
-	_, _, err := parser.ParseUnverified(token, &claims)
-	if err != nil {
-		http.Error(w, "malformed token", http.StatusUnauthorized)
-		return
-	}
+	// 1. Authenticate connection based on type
+	var tenantID string
 
-	tenantID, _ := claims["tenant_id"].(string)
-	if tenantID == "" {
-		http.Error(w, "invalid token payload: missing tenant_id", http.StatusUnauthorized)
-		return
-	}
-
-	// 2. Query tenant secret from master.tenant
-	var secret string
-	err = h.dbPool.QueryRow(r.Context(), "SELECT secret FROM master.tenant WHERE id = $1", tenantID).Scan(&secret)
-	if err != nil {
-		slog.Error("failed to retrieve tenant credentials on ws handshake", "tenant_id", tenantID, "err", err)
-		http.Error(w, "unauthorized tenant", http.StatusUnauthorized)
-		return
-	}
-
-	// 3. Verify token signature with secret
-	parsedToken, err := jwt.Parse(token, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+	if connType == "BOT" {
+		// API Key authentication for bots
+		err := h.dbPool.QueryRow(r.Context(), "SELECT id FROM master.tenant WHERE api_key = $1", token).Scan(&tenantID)
+		if err != nil {
+			slog.Warn("bot ws handshake failed: invalid api key", "err", err)
+			http.Error(w, "invalid API key", http.StatusUnauthorized)
+			return
 		}
-		return []byte(secret), nil
-	})
+	} else {
+		// JWT token authentication for clients (dashboard users)
+		claims := jwt.MapClaims{}
+		parser := jwt.NewParser()
+		_, _, err := parser.ParseUnverified(token, &claims)
+		if err != nil {
+			http.Error(w, "malformed token", http.StatusUnauthorized)
+			return
+		}
 
-	if err != nil || !parsedToken.Valid {
-		http.Error(w, "invalid token signature", http.StatusUnauthorized)
-		return
+		tenantID, _ = claims["tenant_id"].(string)
+		if tenantID == "" {
+			http.Error(w, "invalid token payload: missing tenant_id", http.StatusUnauthorized)
+			return
+		}
+
+		// Query tenant secret from master.tenant
+		var secret string
+		err = h.dbPool.QueryRow(r.Context(), "SELECT secret FROM master.tenant WHERE id = $1", tenantID).Scan(&secret)
+		if err != nil {
+			slog.Error("failed to retrieve tenant credentials on ws handshake", "tenant_id", tenantID, "err", err)
+			http.Error(w, "unauthorized tenant", http.StatusUnauthorized)
+			return
+		}
+
+		// Verify token signature with secret
+		parsedToken, err := jwt.Parse(token, func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+			}
+			return []byte(secret), nil
+		})
+
+		if err != nil || !parsedToken.Valid {
+			http.Error(w, "invalid token signature", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	// 4. Upgrade connection
@@ -482,26 +495,37 @@ func (h *Hub) handleIncomingEvent(client *Client, msg IncomingWSMessage) {
 			BotName string `json:"botName"`
 		}
 		if err := json.Unmarshal(msg.Data, &data); err != nil {
+			slog.Error("failed to unmarshal bot control payload", "err", err, "raw", string(msg.Data))
 			return
 		}
+		slog.Info("received bot control event", "event", msg.Event, "botName", data.BotName, "clientTenant", client.TenantID)
+
 		h.mutex.RLock()
 		var bot *Client
+		var connectedBotNames []string
 		for _, c := range h.clients {
+			if c.ConnectionType == "BOT" {
+				connectedBotNames = append(connectedBotNames, fmt.Sprintf("%s (tenant: %s)", c.Name, c.TenantID))
+			}
 			if c.TenantID == client.TenantID && c.ConnectionType == "BOT" && c.Name == data.BotName {
 				bot = c
-				break
 			}
 		}
 		h.mutex.RUnlock()
 
 		if bot != nil {
+			slog.Info("forwarding control event to bot", "event", msg.Event, "botName", data.BotName)
 			rawMsg, err := json.Marshal(msg)
 			if err == nil {
 				select {
 				case bot.Send <- rawMsg:
+					slog.Info("sent control event bytes to bot", "event", msg.Event, "botName", data.BotName)
 				default:
+					slog.Error("bot send buffer full", "botName", data.BotName)
 				}
 			}
+		} else {
+			slog.Warn("bot not found for control event", "event", msg.Event, "botName", data.BotName, "availableBots", connectedBotNames)
 		}
 	}
 }

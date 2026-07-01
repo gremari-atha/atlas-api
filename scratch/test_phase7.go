@@ -103,11 +103,19 @@ func main() {
 	_ = json.Unmarshal([]byte(tokenRespBody), &tokenData)
 	tenantToken := tokenData["token"]
 
+	// Set API Key for BOT authentication in master.tenant
+	testAPIKey := "e2e-bot-api-key"
+	_, err = dbPool.Exec(ctx, "UPDATE master.tenant SET api_key = $1 WHERE id = $2", testAPIKey, testTenantID)
+	if err != nil {
+		slog.Error("failed to set tenant api_key", "err", err)
+		os.Exit(1)
+	}
+
 	// ==========================================
 	// SIMULATE BOT2 WEB CONNECTION
 	// ==========================================
 	slog.Info("=== SIMULATING BOT2 WS CONNECTION ===")
-	wsAddr := fmt.Sprintf("%s?token=%s&connection_name=bot2&connection_type=BOT", wsURL, tenantToken)
+	wsAddr := fmt.Sprintf("%s?token=%s&connection_name=bot2&connection_type=BOT", wsURL, testAPIKey)
 	conn, _, err := websocket.DefaultDialer.Dial(wsAddr, nil)
 	if err != nil {
 		slog.Error("failed to connect bot2 ws", "err", err)

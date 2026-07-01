@@ -49,10 +49,11 @@ type EmailInfo struct {
 }
 
 type VariantInfo struct {
-	ID        int64        `json:"id,string"`
-	Name      string       `json:"name"`
-	ProductID int64        `json:"product_id,string"`
-	Product   *ProductInfo `json:"product,omitempty"`
+	ID           int64        `json:"id,string"`
+	Name         string       `json:"name"`
+	ProductID    int64        `json:"product_id,string"`
+	CopyTemplate *string      `json:"copy_template,omitempty"`
+	Product      *ProductInfo `json:"product,omitempty"`
 }
 
 type ProductInfo struct {
@@ -65,6 +66,7 @@ type ProfileInfo struct {
 	Name           string     `json:"name"`
 	MaxUser        int        `json:"max_user"`
 	AllowGenerate  bool       `json:"allow_generate"`
+	Metadata       *string    `json:"metadata"`
 	AccountID      int64      `json:"account_id,string"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
@@ -252,7 +254,7 @@ func (h *AccountHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
 		slog.Error("failed to count accounts", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
@@ -275,7 +277,7 @@ func (h *AccountHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
 		slog.Error("failed to query accounts", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()
@@ -294,7 +296,7 @@ func (h *AccountHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 		)
 		if err != nil {
 			slog.Error("failed to scan account", "err", err)
-			response.Error(w, http.StatusInternalServerError, "database scan failed")
+			response.Error(w, http.StatusInternalServerError, "database scan failed", err)
 			return
 		}
 		e.ID = a.EmailID
@@ -315,7 +317,7 @@ func (h *AccountHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 
 		// 1. Fetch profiles in bulk
 		pRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
-			SELECT id, name, max_user, allow_generate, account_id, created_at, updated_at
+			SELECT id, name, max_user, allow_generate, metadata, account_id, created_at, updated_at
 			FROM "%s".account_profile
 			WHERE account_id = ANY($1)
 			ORDER BY name ASC
@@ -326,7 +328,7 @@ func (h *AccountHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 			var profileIDs []int64
 			for pRows.Next() {
 				var pr ProfileInfo
-				if err := pRows.Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.AccountID, &pr.CreatedAt, &pr.UpdatedAt); err == nil {
+				if err := pRows.Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.Metadata, &pr.AccountID, &pr.CreatedAt, &pr.UpdatedAt); err == nil {
 					profiles = append(profiles, pr)
 					profileIDs = append(profileIDs, pr.ID)
 				}
@@ -474,12 +476,13 @@ func (h *AccountHandler) FindOne(w http.ResponseWriter, r *http.Request) {
 	var e EmailInfo
 	var v VariantInfo
 	var p ProductInfo
+	var copyTemplate sql.NullString
 
 	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
 		SELECT a.id, a.account_password, a.subscription_expiry, a.status, a.billing, 
 		       a.batch_start_date, a.batch_end_date, a.email_id, a.product_variant_id, 
 		       a.freeze_until, a.pinned, a.created_at, a.updated_at,
-		       e.email, pv.name, pv.product_id, p.name
+		       e.email, pv.name, pv.copy_template, pv.product_id, p.name
 		FROM "%s".account a
 		JOIN "%s".email e ON a.email_id = e.id
 		JOIN "%s".product_variant pv ON a.product_variant_id = pv.id
@@ -489,12 +492,15 @@ func (h *AccountHandler) FindOne(w http.ResponseWriter, r *http.Request) {
 		&a.ID, &a.AccountPassword, &a.SubscriptionExpiry, &a.Status, &a.Billing,
 		&a.BatchStartDate, &a.BatchEndDate, &a.EmailID, &a.ProductVariantID,
 		&a.FreezeUntil, &a.Pinned, &a.CreatedAt, &a.UpdatedAt,
-		&e.Email, &v.Name, &v.ProductID, &p.Name,
+		&e.Email, &v.Name, &copyTemplate, &v.ProductID, &p.Name,
 	)
 
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("account dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("account dengan id: %d tidak ditemukan", id), err)
 		return
+	}
+	if copyTemplate.Valid {
+		v.CopyTemplate = &copyTemplate.String
 	}
 	e.ID = a.EmailID
 	v.ID = a.ProductVariantID
@@ -505,7 +511,7 @@ func (h *AccountHandler) FindOne(w http.ResponseWriter, r *http.Request) {
 
 	// Get profiles and users
 	pRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
-		SELECT id, name, max_user, allow_generate, created_at, updated_at
+		SELECT id, name, max_user, allow_generate, metadata, created_at, updated_at
 		FROM "%s".account_profile
 		WHERE account_id = $1
 		ORDER BY name ASC
@@ -515,7 +521,7 @@ func (h *AccountHandler) FindOne(w http.ResponseWriter, r *http.Request) {
 		profiles := []ProfileInfo{}
 		for pRows.Next() {
 			var pr ProfileInfo
-			if err := pRows.Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.CreatedAt, &pr.UpdatedAt); err == nil {
+			if err := pRows.Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.Metadata, &pr.CreatedAt, &pr.UpdatedAt); err == nil {
 				pr.AccountID = id
 
 				uRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
@@ -577,7 +583,7 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// Validate expiry date format
 	expiry, err := time.Parse(time.RFC3339, payload.SubscriptionExpiry)
 	if err != nil {
-		response.Error(w, http.StatusBadRequest, "invalid subscription_expiry date format")
+		response.Error(w, http.StatusBadRequest, "invalid subscription_expiry date format", err)
 		return
 	}
 
@@ -585,7 +591,7 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if payload.BatchStartDate != nil && *payload.BatchStartDate != "" {
 		t, err := time.Parse(time.RFC3339, *payload.BatchStartDate)
 		if err != nil {
-			response.Error(w, http.StatusBadRequest, "invalid batch_start_date format")
+			response.Error(w, http.StatusBadRequest, "invalid batch_start_date format", err)
 			return
 		}
 		batchStart = &t
@@ -593,7 +599,7 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if payload.BatchEndDate != nil && *payload.BatchEndDate != "" {
 		t, err := time.Parse(time.RFC3339, *payload.BatchEndDate)
 		if err != nil {
-			response.Error(w, http.StatusBadRequest, "invalid batch_end_date format")
+			response.Error(w, http.StatusBadRequest, "invalid batch_end_date format", err)
 			return
 		}
 		batchEnd = &t
@@ -601,7 +607,7 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -613,11 +619,11 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 		WHERE email_id = $1 AND product_variant_id = $2
 	`, tenantID), payload.EmailID, payload.ProductVariantID).Scan(&count)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed checking account existence")
+		response.Error(w, http.StatusInternalServerError, "failed checking account existence", err)
 		return
 	}
 	if count > 0 {
-		response.Error(w, http.StatusBadRequest, "Akun dengan email dan varian produk sudah ada")
+		response.Error(w, http.StatusBadRequest, "Akun dengan email dan varian produk sudah ada", err)
 		return
 	}
 
@@ -634,7 +640,7 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		slog.Error("failed to create account", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to insert account")
+		response.Error(w, http.StatusInternalServerError, "failed to insert account", err)
 		return
 	}
 
@@ -651,7 +657,7 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 		)
 		if err != nil {
 			slog.Error("failed to insert profile", "err", err)
-			response.Error(w, http.StatusInternalServerError, "failed to insert profiles")
+			response.Error(w, http.StatusInternalServerError, "failed to insert profiles", err)
 			return
 		}
 		seededProfiles = append(seededProfiles, pr)
@@ -671,7 +677,7 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 		)
 		if err != nil {
 			slog.Error("failed to insert modifier", "err", err)
-			response.Error(w, http.StatusInternalServerError, "failed to insert modifiers")
+			response.Error(w, http.StatusInternalServerError, "failed to insert modifiers", err)
 			return
 		}
 		seededModifiers = append(seededModifiers, mod)
@@ -679,7 +685,7 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 	a.Modifier = seededModifiers
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -705,13 +711,13 @@ func (h *AccountHandler) Update(w http.ResponseWriter, r *http.Request) {
 		SELECT status, subscription_expiry, batch_end_date FROM "%s".account WHERE id = $1
 	`, tenantID), id).Scan(&currentStatus, &currentExpiry, &currentBatchEnd)
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("account dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("account dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -729,7 +735,7 @@ func (h *AccountHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if payload.SubscriptionExpiry != nil {
 		t, err := time.Parse(time.RFC3339, *payload.SubscriptionExpiry)
 		if err != nil {
-			response.Error(w, http.StatusBadRequest, "invalid subscription_expiry format")
+			response.Error(w, http.StatusBadRequest, "invalid subscription_expiry format", err)
 			return
 		}
 		query += fmt.Sprintf("subscription_expiry = $%d, ", argIdx)
@@ -775,7 +781,7 @@ func (h *AccountHandler) Update(w http.ResponseWriter, r *http.Request) {
 		`, tenantID), id)
 		if err != nil {
 			slog.Error("failed to expire users on account update", "err", err)
-			response.Error(w, http.StatusInternalServerError, "failed to update users status")
+			response.Error(w, http.StatusInternalServerError, "failed to update users status", err)
 			return
 		}
 		query += "batch_start_date = NULL, batch_end_date = NULL, "
@@ -787,7 +793,7 @@ func (h *AccountHandler) Update(w http.ResponseWriter, r *http.Request) {
 			} else {
 				t, err := time.Parse(time.RFC3339, *payload.BatchStartDate)
 				if err != nil {
-					response.Error(w, http.StatusBadRequest, "invalid batch_start_date format")
+					response.Error(w, http.StatusBadRequest, "invalid batch_start_date format", err)
 					return
 				}
 				query += fmt.Sprintf("batch_start_date = $%d, ", argIdx)
@@ -802,7 +808,7 @@ func (h *AccountHandler) Update(w http.ResponseWriter, r *http.Request) {
 			} else {
 				t, err := time.Parse(time.RFC3339, *payload.BatchEndDate)
 				if err != nil {
-					response.Error(w, http.StatusBadRequest, "invalid batch_end_date format")
+					response.Error(w, http.StatusBadRequest, "invalid batch_end_date format", err)
 					return
 				}
 				query += fmt.Sprintf("batch_end_date = $%d, ", argIdx)
@@ -820,12 +826,12 @@ func (h *AccountHandler) Update(w http.ResponseWriter, r *http.Request) {
 	_, err = tx.Exec(r.Context(), query, args...)
 	if err != nil {
 		slog.Error("failed to update account", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to update account")
+		response.Error(w, http.StatusInternalServerError, "failed to update account", err)
 		return
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -877,13 +883,13 @@ func (h *AccountHandler) UpdateModifier(w http.ResponseWriter, r *http.Request) 
 		SELECT subscription_expiry, batch_end_date FROM "%s".account WHERE id = $1
 	`, tenantID), id).Scan(&expiry, &batchEnd)
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("account dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("account dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -916,7 +922,7 @@ func (h *AccountHandler) UpdateModifier(w http.ResponseWriter, r *http.Request) 
 			}
 			if err != nil {
 				slog.Error("failed to add modifier", "err", err)
-				response.Error(w, http.StatusInternalServerError, "failed to update modifiers")
+				response.Error(w, http.StatusInternalServerError, "failed to update modifiers", err)
 				return
 			}
 			modsToRegister = append(modsToRegister, CreateModNested{ModifierID: m.ModifierID, Metadata: meta})
@@ -926,7 +932,7 @@ func (h *AccountHandler) UpdateModifier(w http.ResponseWriter, r *http.Request) 
 			`, tenantID), meta, id, m.ModifierID)
 			if err != nil {
 				slog.Error("failed to update modifier", "err", err)
-				response.Error(w, http.StatusInternalServerError, "failed to update modifiers")
+				response.Error(w, http.StatusInternalServerError, "failed to update modifiers", err)
 				return
 			}
 			modsToRegister = append(modsToRegister, CreateModNested{ModifierID: m.ModifierID, Metadata: meta})
@@ -936,7 +942,7 @@ func (h *AccountHandler) UpdateModifier(w http.ResponseWriter, r *http.Request) 
 			`, tenantID), id, m.ModifierID)
 			if err != nil {
 				slog.Error("failed to remove modifier", "err", err)
-				response.Error(w, http.StatusInternalServerError, "failed to remove modifiers")
+				response.Error(w, http.StatusInternalServerError, "failed to remove modifiers", err)
 				return
 			}
 			modsToRemove = append(modsToRemove, m.ModifierID)
@@ -944,7 +950,7 @@ func (h *AccountHandler) UpdateModifier(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -979,7 +985,7 @@ func (h *AccountHandler) Freeze(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -990,7 +996,7 @@ func (h *AccountHandler) Freeze(w http.ResponseWriter, r *http.Request) {
 	`, tenantID), freezeUntil, id)
 	if err != nil {
 		slog.Error("failed to freeze account in DB", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to freeze account")
+		response.Error(w, http.StatusInternalServerError, "failed to freeze account", err)
 		return
 	}
 
@@ -1003,12 +1009,12 @@ func (h *AccountHandler) Freeze(w http.ResponseWriter, r *http.Request) {
 	`, freezeUntil, fmt.Sprintf("%d", id), fmt.Sprintf(`{"accountId":"%d"}`, id), tenantID).Scan(&taskID)
 	if err != nil {
 		slog.Error("failed to insert unfreeze task into task_queue", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to schedule unfreeze task")
+		response.Error(w, http.StatusInternalServerError, "failed to schedule unfreeze task", err)
 		return
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -1039,7 +1045,7 @@ func (h *AccountHandler) Unfreeze(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -1049,7 +1055,7 @@ func (h *AccountHandler) Unfreeze(w http.ResponseWriter, r *http.Request) {
 		UPDATE "%s".account SET freeze_until = NULL, updated_at = NOW() WHERE id = $2
 	`, tenantID), id)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to unfreeze account")
+		response.Error(w, http.StatusInternalServerError, "failed to unfreeze account", err)
 		return
 	}
 
@@ -1059,12 +1065,12 @@ func (h *AccountHandler) Unfreeze(w http.ResponseWriter, r *http.Request) {
 		WHERE tenant_id = $1 AND subject_id = $2 AND context = 'unfreezeAccount'
 	`, tenantID, fmt.Sprintf("%d", id))
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to clear unfreeze task queue")
+		response.Error(w, http.StatusInternalServerError, "failed to clear unfreeze task queue", err)
 		return
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -1078,7 +1084,7 @@ func (h *AccountHandler) Remove(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -1087,7 +1093,7 @@ func (h *AccountHandler) Remove(w http.ResponseWriter, r *http.Request) {
 	res, err := tx.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".account WHERE id = $1`, tenantID), id)
 	if err != nil {
 		slog.Error("failed to delete account", "id", id, "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to delete account")
+		response.Error(w, http.StatusInternalServerError, "failed to delete account", err)
 		return
 	}
 
@@ -1103,12 +1109,12 @@ func (h *AccountHandler) Remove(w http.ResponseWriter, r *http.Request) {
 	`, tenantID, fmt.Sprintf("%d", id))
 	if err != nil {
 		slog.Error("failed to delete account tasks", "id", id, "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to clear task queue")
+		response.Error(w, http.StatusInternalServerError, "failed to clear task queue", err)
 		return
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -1136,7 +1142,7 @@ func (h *AccountHandler) CountStatusAccount(w http.ResponseWriter, r *http.Reque
 	err := h.dbPool.QueryRow(r.Context(), disabledQuery, disabledArgs...).Scan(&disabledCount)
 	if err != nil {
 		slog.Error("failed counting disabled accounts", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
@@ -1156,7 +1162,7 @@ func (h *AccountHandler) CountStatusAccount(w http.ResponseWriter, r *http.Reque
 	err = h.dbPool.QueryRow(r.Context(), expiringQuery, expiringArgs...).Scan(&expiringCount)
 	if err != nil {
 		slog.Error("failed counting expiring accounts", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
@@ -1222,7 +1228,7 @@ func (h *AccountHandler) CountStatusAccount(w http.ResponseWriter, r *http.Reque
 	err = h.dbPool.QueryRow(r.Context(), cteQuery, cteArgs...).Scan(&profilesAvailable, &profilesLocked, &accountsWithSlots, &accountsFull)
 	if err != nil && err != sql.ErrNoRows {
 		slog.Error("failed executing CTE slot stats", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database aggregation failed")
+		response.Error(w, http.StatusInternalServerError, "database aggregation failed", err)
 		return
 	}
 
@@ -1420,12 +1426,12 @@ func (h *AccountHandler) FindAllProfiles(w http.ResponseWriter, r *http.Request)
 	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".account_profile %s`, tenantID, whereClause)
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, name, max_user, allow_generate, account_id, created_at, updated_at
+		SELECT id, name, max_user, allow_generate, metadata, account_id, created_at, updated_at
 		FROM "%s".account_profile
 		%s
 		ORDER BY name ASC
@@ -1435,16 +1441,16 @@ func (h *AccountHandler) FindAllProfiles(w http.ResponseWriter, r *http.Request)
 	selectArgs := append(args, limit, offset)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var pr ProfileInfo
-		err = rows.Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.AccountID, &pr.CreatedAt, &pr.UpdatedAt)
+		err = rows.Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.Metadata, &pr.AccountID, &pr.CreatedAt, &pr.UpdatedAt)
 		if err != nil {
-			response.Error(w, http.StatusInternalServerError, "database scan failed")
+			response.Error(w, http.StatusInternalServerError, "database scan failed", err)
 			return
 		}
 		profiles = append(profiles, pr)
@@ -1460,11 +1466,11 @@ func (h *AccountHandler) FindOneProfile(w http.ResponseWriter, r *http.Request) 
 
 	var pr ProfileInfo
 	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT id, name, max_user, allow_generate, account_id, created_at, updated_at
+		SELECT id, name, max_user, allow_generate, metadata, account_id, created_at, updated_at
 		FROM "%s".account_profile WHERE id = $1
-	`, tenantID), id).Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.AccountID, &pr.CreatedAt, &pr.UpdatedAt)
+	`, tenantID), id).Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.Metadata, &pr.AccountID, &pr.CreatedAt, &pr.UpdatedAt)
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("accountProfile dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("accountProfile dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
@@ -1488,12 +1494,12 @@ func (h *AccountHandler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
 		INSERT INTO "%s".account_profile (name, max_user, allow_generate, account_id, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, NOW(), NOW())
-		RETURNING id, name, max_user, allow_generate, account_id, created_at, updated_at
-	`, tenantID), payload.Name, payload.MaxUser, payload.AllowGenerate, payload.AccountID).Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.AccountID, &pr.CreatedAt, &pr.UpdatedAt)
+		RETURNING id, name, max_user, allow_generate, metadata, account_id, created_at, updated_at
+	`, tenantID), payload.Name, payload.MaxUser, payload.AllowGenerate, payload.AccountID).Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.Metadata, &pr.AccountID, &pr.CreatedAt, &pr.UpdatedAt)
 
 	if err != nil {
 		slog.Error("failed to create profile", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to insert profile")
+		response.Error(w, http.StatusInternalServerError, "failed to insert profile", err)
 		return
 	}
 
@@ -1508,7 +1514,7 @@ func (h *AccountHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -1541,7 +1547,7 @@ func (h *AccountHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	res, err := tx.Exec(r.Context(), query, args...)
 	if err != nil {
 		slog.Error("failed to update profile", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to update profile")
+		response.Error(w, http.StatusInternalServerError, "failed to update profile", err)
 		return
 	}
 
@@ -1551,15 +1557,15 @@ func (h *AccountHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
 	var pr ProfileInfo
 	_ = h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT id, name, max_user, allow_generate, account_id, created_at, updated_at
+		SELECT id, name, max_user, allow_generate, metadata, account_id, created_at, updated_at
 		FROM "%s".account_profile WHERE id = $1
-	`, tenantID), id).Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.AccountID, &pr.CreatedAt, &pr.UpdatedAt)
+	`, tenantID), id).Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.Metadata, &pr.AccountID, &pr.CreatedAt, &pr.UpdatedAt)
 
 	response.JSON(w, http.StatusOK, pr)
 }
@@ -1571,12 +1577,12 @@ func (h *AccountHandler) RemoveProfile(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".account_profile WHERE id = $1`, tenantID), id)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to delete profile")
+		response.Error(w, http.StatusInternalServerError, "failed to delete profile", err)
 		return
 	}
 
 	if res.RowsAffected() == 0 {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("accountProfile dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("accountProfile dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
@@ -1636,7 +1642,7 @@ func (h *AccountHandler) FindAllUsers(w http.ResponseWriter, r *http.Request) {
 	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".account_user %s`, tenantID, whereClause)
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
@@ -1651,7 +1657,7 @@ func (h *AccountHandler) FindAllUsers(w http.ResponseWriter, r *http.Request) {
 	selectArgs := append(args, limit, offset)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()
@@ -1660,7 +1666,7 @@ func (h *AccountHandler) FindAllUsers(w http.ResponseWriter, r *http.Request) {
 		var u UserInfo
 		err = rows.Scan(&u.ID, &u.Name, &u.Status, &u.ExpiredAt, &u.AccountProfileID, &u.AccountID, &u.CreatedAt, &u.UpdatedAt)
 		if err != nil {
-			response.Error(w, http.StatusInternalServerError, "database scan failed")
+			response.Error(w, http.StatusInternalServerError, "database scan failed", err)
 			return
 		}
 		users = append(users, u)
@@ -1680,7 +1686,7 @@ func (h *AccountHandler) FindOneUser(w http.ResponseWriter, r *http.Request) {
 		FROM "%s".account_user WHERE id = $1
 	`, tenantID), id).Scan(&u.ID, &u.Name, &u.Status, &u.ExpiredAt, &u.AccountProfileID, &u.AccountID, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("accountUser dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("accountUser dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
@@ -1696,7 +1702,7 @@ func (h *AccountHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	if payload.ExpiredAt != nil && *payload.ExpiredAt != "" {
 		t, err := time.Parse(time.RFC3339, *payload.ExpiredAt)
 		if err != nil {
-			response.Error(w, http.StatusBadRequest, "invalid expired_at format")
+			response.Error(w, http.StatusBadRequest, "invalid expired_at format", err)
 			return
 		}
 		expiredAt = &t
@@ -1704,7 +1710,7 @@ func (h *AccountHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -1727,12 +1733,12 @@ func (h *AccountHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		`, tenantID, tenantID), finalProfileID).Scan(&finalAccountID, &maxUser, &currentUserCount)
 
 		if err != nil {
-			response.Error(w, http.StatusBadRequest, "associated profile not found")
+			response.Error(w, http.StatusBadRequest, "associated profile not found", err)
 			return
 		}
 
 		if currentUserCount >= maxUser {
-			response.Error(w, http.StatusBadRequest, "Account profile full")
+			response.Error(w, http.StatusBadRequest, "Account profile full", err)
 			return
 		}
 	} else {
@@ -1801,7 +1807,7 @@ func (h *AccountHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		err = tx.QueryRow(r.Context(), sqlQuery, payload.ProductVariantID).Scan(&candidateProfileId, &accountId, &status)
 		if err != nil {
 			slog.Warn("no candidate profile found for variant", "variant_id", payload.ProductVariantID)
-			response.Error(w, http.StatusBadRequest, "No account profile available")
+			response.Error(w, http.StatusBadRequest, "No account profile available", err)
 			return
 		}
 
@@ -1814,6 +1820,26 @@ func (h *AccountHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		finalAccountID = accountId
 	}
 
+	// Fetch the variant duration for finalProfileID
+	var durationMs int64
+	err = tx.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT pv.duration
+		FROM "%s".account_profile ap
+		JOIN "%s".account a ON ap.account_id = a.id
+		JOIN "%s".product_variant pv ON a.product_variant_id = pv.id
+		WHERE ap.id = $1
+	`, tenantID, tenantID, tenantID), finalProfileID).Scan(&durationMs)
+	if err != nil {
+		slog.Error("failed to fetch product variant duration for profile", "err", err)
+		response.Error(w, http.StatusInternalServerError, "failed to get variant duration", err)
+		return
+	}
+
+	if expiredAt == nil {
+		t := time.Now().Add(time.Duration(durationMs) * time.Millisecond)
+		expiredAt = &t
+	}
+
 	var u UserInfo
 	err = tx.QueryRow(r.Context(), fmt.Sprintf(`
 		INSERT INTO "%s".account_user (name, status, expired_at, account_profile_id, account_id, created_at, updated_at)
@@ -1823,16 +1849,130 @@ func (h *AccountHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		slog.Error("failed to create user", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to insert user")
+		response.Error(w, http.StatusInternalServerError, "failed to insert user", err)
 		return
+	}
+
+	// Sync account status and batch dates
+	_, err = tx.Exec(r.Context(), fmt.Sprintf(`
+		UPDATE "%s".account
+		SET status = CASE
+			WHEN EXISTS (
+				SELECT 1 FROM "%s".account_user
+				WHERE account_id = $1 AND status = 'active'
+			) THEN 'active'
+			ELSE 'ready'
+		END,
+		batch_end_date = (
+			SELECT MAX(expired_at) FROM "%s".account_user
+			WHERE account_id = $1 AND status = 'active'
+		),
+		batch_start_date = CASE
+			WHEN EXISTS (
+				SELECT 1 FROM "%s".account_user
+				WHERE account_id = $1 AND status = 'active'
+			) THEN COALESCE(
+				batch_start_date,
+				(
+					SELECT MIN(created_at) FROM "%s".account_user
+					WHERE account_id = $1 AND status = 'active'
+				),
+				NOW()
+			)
+			ELSE NULL
+		END
+		WHERE id = $2 AND status != 'disable'
+	`, tenantID, tenantID, tenantID, tenantID, tenantID), finalAccountID, finalAccountID)
+	if err != nil {
+		slog.Error("failed to sync account status and batch dates on user creation", "err", err)
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
-	response.JSON(w, http.StatusCreated, u)
+	// Now fetch the updated Account
+	var a Account
+	var e EmailInfo
+	var v VariantInfo
+	var p ProductInfo
+	var copyTemplate sql.NullString
+
+	err = h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT a.id, a.account_password, a.subscription_expiry, a.status, a.billing, 
+		       a.batch_start_date, a.batch_end_date, a.email_id, a.product_variant_id, 
+		       a.freeze_until, a.pinned, a.created_at, a.updated_at,
+		       e.email, pv.name, pv.copy_template, pv.product_id, p.name
+		FROM "%s".account a
+		JOIN "%s".email e ON a.email_id = e.id
+		JOIN "%s".product_variant pv ON a.product_variant_id = pv.id
+		JOIN "%s".product p ON pv.product_id = p.id
+		WHERE a.id = $1
+	`, tenantID, tenantID, tenantID, tenantID), finalAccountID).Scan(
+		&a.ID, &a.AccountPassword, &a.SubscriptionExpiry, &a.Status, &a.Billing,
+		&a.BatchStartDate, &a.BatchEndDate, &a.EmailID, &a.ProductVariantID,
+		&a.FreezeUntil, &a.Pinned, &a.CreatedAt, &a.UpdatedAt,
+		&e.Email, &v.Name, &copyTemplate, &v.ProductID, &p.Name,
+	)
+	if err != nil {
+		slog.Error("failed to load updated account", "err", err)
+		response.Error(w, http.StatusInternalServerError, "failed to load updated account", err)
+		return
+	}
+	if copyTemplate.Valid {
+		v.CopyTemplate = &copyTemplate.String
+	}
+	e.ID = a.EmailID
+	v.ID = a.ProductVariantID
+	p.ID = v.ProductID
+	v.Product = &p
+	a.Email = &e
+	a.ProductVariant = &v
+
+	// Now fetch the updated AccountProfile
+	var pr ProfileInfo
+	err = h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT id, name, max_user, allow_generate, metadata, account_id, created_at, updated_at
+		FROM "%s".account_profile WHERE id = $1
+	`, tenantID), finalProfileID).Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.Metadata, &pr.AccountID, &pr.CreatedAt, &pr.UpdatedAt)
+	if err != nil {
+		slog.Error("failed to load updated profile", "err", err)
+		response.Error(w, http.StatusInternalServerError, "failed to load updated profile", err)
+		return
+	}
+
+	// Load active users for this profile to match frontend model
+	uRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
+		SELECT id, name, status, expired_at, account_id, created_at, updated_at
+		FROM "%s".account_user
+		WHERE account_profile_id = $1 AND status = 'active'
+	`, tenantID), pr.ID)
+	if err == nil {
+		defer uRows.Close()
+		users := []UserInfo{}
+		for uRows.Next() {
+			var usr UserInfo
+			if err := uRows.Scan(&usr.ID, &usr.Name, &usr.Status, &usr.ExpiredAt, &usr.AccountID, &usr.CreatedAt, &usr.UpdatedAt); err == nil {
+				usr.AccountProfileID = pr.ID
+				users = append(users, usr)
+			}
+		}
+		pr.User = users
+	} else {
+		pr.User = []UserInfo{}
+	}
+
+	// Construct the combined response structure matching NestJS
+	type CreateUserResponse struct {
+		Account Account     `json:"account"`
+		Profile ProfileInfo `json:"profile"`
+	}
+
+	response.JSON(w, http.StatusCreated, CreateUserResponse{
+		Account: a,
+		Profile: pr,
+	})
 }
 
 func (h *AccountHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
@@ -1843,7 +1983,7 @@ func (h *AccountHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -1869,7 +2009,7 @@ func (h *AccountHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		} else {
 			t, err := time.Parse(time.RFC3339, *payload.ExpiredAt)
 			if err != nil {
-				response.Error(w, http.StatusBadRequest, "invalid expired_at format")
+				response.Error(w, http.StatusBadRequest, "invalid expired_at format", err)
 				return
 			}
 			query += fmt.Sprintf("expired_at = $%d, ", argIdx)
@@ -1885,7 +2025,7 @@ func (h *AccountHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	res, err := tx.Exec(r.Context(), query, args...)
 	if err != nil {
 		slog.Error("failed to update user", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to update user")
+		response.Error(w, http.StatusInternalServerError, "failed to update user", err)
 		return
 	}
 
@@ -1894,8 +2034,48 @@ func (h *AccountHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Update account status and batch dates based on active users
+	var accountID int64
+	err = tx.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT account_id FROM "%s".account_user WHERE id = $1
+	`, tenantID), id).Scan(&accountID)
+	if err == nil {
+		_, err = tx.Exec(r.Context(), fmt.Sprintf(`
+			UPDATE "%s".account
+			SET status = CASE
+				WHEN EXISTS (
+					SELECT 1 FROM "%s".account_user
+					WHERE account_id = $1 AND status = 'active'
+				) THEN 'active'
+				ELSE 'ready'
+			END,
+			batch_end_date = (
+				SELECT MAX(expired_at) FROM "%s".account_user
+				WHERE account_id = $1 AND status = 'active'
+			),
+			batch_start_date = CASE
+				WHEN EXISTS (
+					SELECT 1 FROM "%s".account_user
+					WHERE account_id = $1 AND status = 'active'
+				) THEN COALESCE(
+					batch_start_date,
+					(
+						SELECT MIN(created_at) FROM "%s".account_user
+						WHERE account_id = $1 AND status = 'active'
+					),
+					NOW()
+				)
+				ELSE NULL
+			END
+			WHERE id = $2 AND status != 'disable'
+		`, tenantID, tenantID, tenantID, tenantID, tenantID), accountID, accountID)
+		if err != nil {
+			slog.Error("failed to sync account status and batch dates after user update", "err", err)
+		}
+	}
+
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -1913,14 +2093,70 @@ func (h *AccountHandler) RemoveUser(w http.ResponseWriter, r *http.Request) {
 	tenantID := uCtx.TenantID
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 
-	res, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".account_user WHERE id = $1`, tenantID), id)
+	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to delete user")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	// Fetch account_id first
+	var accountID int64
+	err = tx.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT account_id FROM "%s".account_user WHERE id = $1
+	`, tenantID), id).Scan(&accountID)
+	if err != nil {
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("accountUser dengan id: %d tidak ditemukan", id), err)
+		return
+	}
+
+	res, err := tx.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".account_user WHERE id = $1`, tenantID), id)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "failed to delete user", err)
 		return
 	}
 
 	if res.RowsAffected() == 0 {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("accountUser dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("accountUser dengan id: %d tidak ditemukan", id), err)
+		return
+	}
+
+	// Update account status and batch dates based on remaining active users
+	_, err = tx.Exec(r.Context(), fmt.Sprintf(`
+		UPDATE "%s".account
+		SET status = CASE
+			WHEN EXISTS (
+				SELECT 1 FROM "%s".account_user
+				WHERE account_id = $1 AND status = 'active'
+			) THEN 'active'
+			ELSE 'ready'
+		END,
+		batch_end_date = (
+			SELECT MAX(expired_at) FROM "%s".account_user
+			WHERE account_id = $1 AND status = 'active'
+		),
+		batch_start_date = CASE
+			WHEN EXISTS (
+				SELECT 1 FROM "%s".account_user
+				WHERE account_id = $1 AND status = 'active'
+			) THEN COALESCE(
+				batch_start_date,
+				(
+					SELECT MIN(created_at) FROM "%s".account_user
+					WHERE account_id = $1 AND status = 'active'
+				),
+				NOW()
+			)
+			ELSE NULL
+		END
+		WHERE id = $2 AND status != 'disable'
+	`, tenantID, tenantID, tenantID, tenantID, tenantID), accountID, accountID)
+	if err != nil {
+		slog.Error("failed to sync account status and batch dates after user delete", "err", err)
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 

@@ -43,11 +43,21 @@ func JSON(w http.ResponseWriter, status int, data interface{}) {
 }
 
 // Error sends a standardized error JSON response and logs it automatically.
-func Error(w http.ResponseWriter, status int, message string) {
+func Error(w http.ResponseWriter, status int, message string, errs ...error) {
+	var err error
+	if len(errs) > 0 {
+		err = errs[0]
+	}
+
+	attrs := []any{"status", status}
+	if err != nil {
+		attrs = append(attrs, "err", err.Error())
+	}
+
 	if status >= 500 {
-		slog.Error(message, "status", status)
+		slog.Error(message, attrs...)
 	} else if status >= 400 {
-		slog.Warn(message, "status", status)
+		slog.Warn(message, attrs...)
 	}
 	JSON(w, status, ErrorResponse{Error: message})
 }

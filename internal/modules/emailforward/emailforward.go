@@ -62,7 +62,7 @@ func (h *EmailForwardHandler) ReceiveEmail(w http.ResponseWriter, r *http.Reques
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		slog.Error("failed to serialize email forward payload", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to serialize payload")
+		response.Error(w, http.StatusInternalServerError, "failed to serialize payload", err)
 		return
 	}
 
@@ -73,7 +73,7 @@ func (h *EmailForwardHandler) ReceiveEmail(w http.ResponseWriter, r *http.Reques
 
 	if err != nil {
 		slog.Error("failed to enqueue email forward payload", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to queue email")
+		response.Error(w, http.StatusInternalServerError, "failed to queue email", err)
 		return
 	}
 

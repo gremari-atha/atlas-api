@@ -102,11 +102,18 @@ func main() {
 	}
 	var tokenData map[string]string
 	_ = json.Unmarshal([]byte(tokenRespBody), &tokenData)
-	tenantToken := tokenData["token"]
+
+	// Set API Key for BOT authentication in master.tenant
+	testAPIKey := "e2e-bot-api-key"
+	_, err = dbPool.Exec(ctx, "UPDATE master.tenant SET api_key = $1 WHERE id = $2", testAPIKey, testTenantID)
+	if err != nil {
+		slog.Error("failed to set tenant api_key", "err", err)
+		os.Exit(1)
+	}
 
 	// Connect WebSocket
 	slog.Info("Connecting WebSocket client to Hub...")
-	wsAddr := fmt.Sprintf("%s?token=%s&connection_name=e2e-mail-tester&connection_type=BOT", wsURL, tenantToken)
+	wsAddr := fmt.Sprintf("%s?token=%s&connection_name=e2e-mail-tester&connection_type=BOT", wsURL, testAPIKey)
 	conn, _, err := websocket.DefaultDialer.Dial(wsAddr, nil)
 	if err != nil {
 		slog.Error("failed to connect websocket", "err", err)

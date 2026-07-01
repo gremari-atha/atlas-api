@@ -77,7 +77,7 @@ func (h *LoggerHandler) GetLogWithPagination(w http.ResponseWriter, r *http.Requ
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
 		slog.Error("failed to count tenant logs", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
@@ -93,7 +93,7 @@ func (h *LoggerHandler) GetLogWithPagination(w http.ResponseWriter, r *http.Requ
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
 		slog.Error("failed to query tenant logs", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()
@@ -142,7 +142,7 @@ func (h *LoggerHandler) GetSyslogWithPagination(w http.ResponseWriter, r *http.R
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
 		slog.Error("failed to count system logs", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
@@ -158,7 +158,7 @@ func (h *LoggerHandler) GetSyslogWithPagination(w http.ResponseWriter, r *http.R
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
 		slog.Error("failed to query system logs", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()
@@ -195,7 +195,7 @@ func (h *LoggerHandler) LogToDb(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		slog.Error("failed to log to DB", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to insert log entry")
+		response.Error(w, http.StatusInternalServerError, "failed to insert log entry", err)
 		return
 	}
 

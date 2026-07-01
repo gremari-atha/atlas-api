@@ -92,7 +92,7 @@ func (h *EmailHandler) FindAllEmails(w http.ResponseWriter, r *http.Request) {
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
 		slog.Error("failed to count emails", "tenant", tenantID, "err", err)
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
@@ -108,7 +108,7 @@ func (h *EmailHandler) FindAllEmails(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
 		slog.Error("failed to query emails", "tenant", tenantID, "err", err)
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()
@@ -136,7 +136,7 @@ func (h *EmailHandler) FindOneEmail(w http.ResponseWriter, r *http.Request) {
 	`, tenantID), id).Scan(&em.ID, &em.Email, &em.Password, &em.CreatedAt, &em.UpdatedAt)
 
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("email dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("email dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
@@ -165,7 +165,7 @@ func (h *EmailHandler) CreateEmail(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		slog.Error("failed to create email", "tenant", tenantID, "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to insert email")
+		response.Error(w, http.StatusInternalServerError, "failed to insert email", err)
 		return
 	}
 
@@ -187,7 +187,7 @@ func (h *EmailHandler) UpdateEmail(w http.ResponseWriter, r *http.Request) {
 	var dummy int
 	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`SELECT 1 FROM "%s".email WHERE id = $1`, tenantID), id).Scan(&dummy)
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("email dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("email dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
@@ -223,7 +223,7 @@ func (h *EmailHandler) UpdateEmail(w http.ResponseWriter, r *http.Request) {
 	_, err = h.dbPool.Exec(r.Context(), query, args...)
 	if err != nil {
 		slog.Error("failed to update email", "tenant", tenantID, "id", id, "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to update email")
+		response.Error(w, http.StatusInternalServerError, "failed to update email", err)
 		return
 	}
 
@@ -244,7 +244,7 @@ func (h *EmailHandler) RemoveEmail(w http.ResponseWriter, r *http.Request) {
 	res, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".email WHERE id = $1`, tenantID), id)
 	if err != nil {
 		slog.Error("failed to delete email", "tenant", tenantID, "id", id, "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to delete email")
+		response.Error(w, http.StatusInternalServerError, "failed to delete email", err)
 		return
 	}
 
@@ -278,7 +278,7 @@ func (h *EmailHandler) FindAllEmailMessages(w http.ResponseWriter, r *http.Reque
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
 		slog.Error("failed to count email messages", "tenant", tenantID, "err", err)
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
@@ -294,7 +294,7 @@ func (h *EmailHandler) FindAllEmailMessages(w http.ResponseWriter, r *http.Reque
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
 		slog.Error("failed to query email messages", "tenant", tenantID, "err", err)
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()

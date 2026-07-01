@@ -73,7 +73,7 @@ func (h *TenantHandler) GenerateAccessToken(w http.ResponseWriter, r *http.Reque
 	err := h.dbPool.QueryRow(r.Context(), "SELECT secret FROM master.tenant WHERE id = $1", payload.TenantID).Scan(&secret)
 	if err != nil {
 		slog.Warn("tenant access token failed: tenant not found", "tenant_id", payload.TenantID)
-		response.Error(w, http.StatusUnauthorized, "App Id or Secret invalid")
+		response.Error(w, http.StatusUnauthorized, "App Id or Secret invalid", err)
 		return
 	}
 
@@ -91,7 +91,7 @@ func (h *TenantHandler) GenerateAccessToken(w http.ResponseWriter, r *http.Reque
 	tokenString, err := token.SignedString([]byte(secret))
 	if err != nil {
 		slog.Error("failed to sign jwt", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to sign access token")
+		response.Error(w, http.StatusInternalServerError, "failed to sign access token", err)
 		return
 	}
 
@@ -113,14 +113,14 @@ func (h *TenantHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 		err = h.dbPool.QueryRow(r.Context(), "SELECT COUNT(*) FROM master.tenant WHERE id ILIKE $1", "%"+tenantFilter+"%").Scan(&total)
 		if err != nil {
 			slog.Error("failed to count tenants", "err", err)
-			response.Error(w, http.StatusInternalServerError, "database query failed")
+			response.Error(w, http.StatusInternalServerError, "database query failed", err)
 			return
 		}
 
 		rows, err := h.dbPool.Query(r.Context(), "SELECT id, secret, created_at, updated_at FROM master.tenant WHERE id ILIKE $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3", "%"+tenantFilter+"%", limit, offset)
 		if err != nil {
 			slog.Error("failed to query tenants", "err", err)
-			response.Error(w, http.StatusInternalServerError, "database query failed")
+			response.Error(w, http.StatusInternalServerError, "database query failed", err)
 			return
 		}
 		defer rows.Close()
@@ -130,7 +130,7 @@ func (h *TenantHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 			var cr, up sql.NullTime
 			if err := rows.Scan(&t.ID, &t.Secret, &cr, &up); err != nil {
 				slog.Error("failed to scan tenant", "err", err)
-				response.Error(w, http.StatusInternalServerError, "database scan failed")
+				response.Error(w, http.StatusInternalServerError, "database scan failed", err)
 				return
 			}
 			if cr.Valid {
@@ -145,14 +145,14 @@ func (h *TenantHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 		err = h.dbPool.QueryRow(r.Context(), "SELECT COUNT(*) FROM master.tenant").Scan(&total)
 		if err != nil {
 			slog.Error("failed to count tenants", "err", err)
-			response.Error(w, http.StatusInternalServerError, "database query failed")
+			response.Error(w, http.StatusInternalServerError, "database query failed", err)
 			return
 		}
 
 		rows, err := h.dbPool.Query(r.Context(), "SELECT id, secret, created_at, updated_at FROM master.tenant ORDER BY created_at DESC LIMIT $1 OFFSET $2", limit, offset)
 		if err != nil {
 			slog.Error("failed to query tenants", "err", err)
-			response.Error(w, http.StatusInternalServerError, "database query failed")
+			response.Error(w, http.StatusInternalServerError, "database query failed", err)
 			return
 		}
 		defer rows.Close()
@@ -162,7 +162,7 @@ func (h *TenantHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 			var cr, up sql.NullTime
 			if err := rows.Scan(&t.ID, &t.Secret, &cr, &up); err != nil {
 				slog.Error("failed to scan tenant", "err", err)
-				response.Error(w, http.StatusInternalServerError, "database scan failed")
+				response.Error(w, http.StatusInternalServerError, "database scan failed", err)
 				return
 			}
 			if cr.Valid {
@@ -185,7 +185,7 @@ func (h *TenantHandler) FindOne(w http.ResponseWriter, r *http.Request) {
 	var cr, up sql.NullTime
 	err := h.dbPool.QueryRow(r.Context(), "SELECT id, secret, created_at, updated_at FROM master.tenant WHERE id = $1", id).Scan(&t.ID, &t.Secret, &cr, &up)
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("tenant dengan id: %s tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("tenant dengan id: %s tidak ditemukan", id), err)
 		return
 	}
 	if cr.Valid {
@@ -205,7 +205,7 @@ func (h *TenantHandler) Create(w http.ResponseWriter, r *http.Request) {
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
 		slog.Error("failed to begin transaction", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -221,7 +221,7 @@ func (h *TenantHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		slog.Error("failed to insert tenant", "id", payload.ID, "err", err)
-		response.Error(w, http.StatusBadRequest, "App Id already exists or DB constraint error")
+		response.Error(w, http.StatusBadRequest, "App Id already exists or DB constraint error", err)
 		return
 	}
 
@@ -230,14 +230,14 @@ func (h *TenantHandler) Create(w http.ResponseWriter, r *http.Request) {
 	_, err = tx.Exec(r.Context(), schemaQuery)
 	if err != nil {
 		slog.Error("failed to create schema", "id", payload.ID, "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to create tenant schema")
+		response.Error(w, http.StatusInternalServerError, "failed to create tenant schema", err)
 		return
 	}
 
 	// Commit PostgreSQL transaction first so that database-migration tool can connect and find the schema
 	if err := tx.Commit(r.Context()); err != nil {
 		slog.Error("failed to commit transaction", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -253,7 +253,7 @@ func (h *TenantHandler) Create(w http.ResponseWriter, r *http.Request) {
 		// Try to clean up database tenant entry since migrations failed
 		_, _ = h.dbPool.Exec(context.Background(), "DELETE FROM master.tenant WHERE id = $1", payload.ID)
 		_, _ = h.dbPool.Exec(context.Background(), fmt.Sprintf(`DROP SCHEMA IF EXISTS "%s" CASCADE`, payload.ID))
-		response.Error(w, http.StatusInternalServerError, "dynamic migration failed: "+err.Error())
+		response.Error(w, http.StatusInternalServerError, "dynamic migration failed: "+err.Error(), err)
 		return
 	}
 
@@ -281,7 +281,7 @@ func (h *TenantHandler) Update(w http.ResponseWriter, r *http.Request) {
 	`, payload.Secret, id).Scan(&t.ID, &t.Secret, &cr, &up)
 
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("tenant dengan id: %s tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("tenant dengan id: %s tidak ditemukan", id), err)
 		return
 	}
 	if cr.Valid {
@@ -299,7 +299,7 @@ func (h *TenantHandler) Remove(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -308,7 +308,7 @@ func (h *TenantHandler) Remove(w http.ResponseWriter, r *http.Request) {
 	res, err := tx.Exec(r.Context(), "DELETE FROM master.tenant WHERE id = $1", id)
 	if err != nil {
 		slog.Error("failed to delete tenant", "id", id, "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to delete tenant record")
+		response.Error(w, http.StatusInternalServerError, "failed to delete tenant record", err)
 		return
 	}
 
@@ -322,12 +322,12 @@ func (h *TenantHandler) Remove(w http.ResponseWriter, r *http.Request) {
 	_, err = tx.Exec(r.Context(), fmt.Sprintf(`DROP SCHEMA IF EXISTS "%s" CASCADE`, id))
 	if err != nil {
 		slog.Error("failed to drop schema", "id", id, "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to drop tenant schema")
+		response.Error(w, http.StatusInternalServerError, "failed to drop tenant schema", err)
 		return
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 

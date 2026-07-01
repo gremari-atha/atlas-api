@@ -103,67 +103,104 @@ func (am *AuthMiddleware) SuperadminAuth(next http.Handler) http.Handler {
 // TenantAuth guards endpoints for operational tenant business logic
 func (am *AuthMiddleware) TenantAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tokenStr, err := extractToken(r)
-		if err != nil {
-			response.Error(w, http.StatusUnauthorized, err.Error())
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			response.Error(w, http.StatusUnauthorized, "authorization header is missing")
 			return
 		}
 
-		// 1. Decode token unverified to extract tenant_id first
-		claims := jwt.MapClaims{}
-		parser := jwt.NewParser()
-		_, _, err = parser.ParseUnverified(tokenStr, &claims)
-		if err != nil {
-			response.Error(w, http.StatusUnauthorized, "malformed authorization token")
-			return
-		}
+		if strings.HasPrefix(authHeader, "VC ") {
+			tokenStr := strings.TrimPrefix(authHeader, "VC ")
 
-		tenantID, _ := claims["tenant_id"].(string)
-		role, _ := claims["role"].(string)
-
-		if tenantID == "" {
-			response.Error(w, http.StatusUnauthorized, "invalid token: missing tenant_id")
-			return
-		}
-
-		// 2. Validate header x-tenant-id matches token tenant_id
-		headerTenantID := r.Header.Get("x-tenant-id")
-		if headerTenantID == "" {
-			response.Error(w, http.StatusBadRequest, "missing x-tenant-id header")
-			return
-		}
-
-		if headerTenantID != tenantID {
-			response.Error(w, http.StatusUnauthorized, "tenant mismatch")
-			return
-		}
-
-		// 3. Query tenant secret from master.tenant
-		var secret string
-		err = am.dbPool.QueryRow(r.Context(), "SELECT secret FROM master.tenant WHERE id = $1", tenantID).Scan(&secret)
-		if err != nil {
-			slog.Error("failed to retrieve tenant credentials from database", "tenant_id", tenantID, "err", err)
-			response.Error(w, http.StatusUnauthorized, "invalid tenant")
-			return
-		}
-
-		// 4. Verify token signature with tenant's secret key
-		token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
-			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+			// 1. Decode token unverified to extract tenant_id first
+			claims := jwt.MapClaims{}
+			parser := jwt.NewParser()
+			_, _, err := parser.ParseUnverified(tokenStr, &claims)
+			if err != nil {
+				response.Error(w, http.StatusUnauthorized, "malformed authorization token")
+				return
 			}
-			return []byte(secret), nil
-		})
 
-		if err != nil || !token.Valid {
-			response.Error(w, http.StatusUnauthorized, "invalid or expired token")
+			tenantID, _ := claims["tenant_id"].(string)
+			role, _ := claims["role"].(string)
+
+			if tenantID == "" {
+				response.Error(w, http.StatusUnauthorized, "invalid token: missing tenant_id")
+				return
+			}
+
+			// 2. Validate header x-tenant-id matches token tenant_id
+			headerTenantID := r.Header.Get("x-tenant-id")
+			if headerTenantID == "" {
+				response.Error(w, http.StatusBadRequest, "missing x-tenant-id header")
+				return
+			}
+
+			if headerTenantID != tenantID {
+				response.Error(w, http.StatusUnauthorized, "tenant mismatch")
+				return
+			}
+
+			// 3. Query tenant secret from master.tenant
+			var secret string
+			err = am.dbPool.QueryRow(r.Context(), "SELECT secret FROM master.tenant WHERE id = $1", tenantID).Scan(&secret)
+			if err != nil {
+				slog.Error("failed to retrieve tenant credentials from database", "tenant_id", tenantID, "err", err)
+				response.Error(w, http.StatusUnauthorized, "invalid tenant")
+				return
+			}
+
+			// 4. Verify token signature with tenant's secret key
+			token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
+				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+					return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+				}
+				return []byte(secret), nil
+			})
+
+			if err != nil || !token.Valid {
+				response.Error(w, http.StatusUnauthorized, "invalid or expired token")
+				return
+			}
+
+			ctx := context.WithValue(r.Context(), userContextKey, UserContext{
+				TenantID: tenantID,
+				Role:     role,
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), userContextKey, UserContext{
-			TenantID: tenantID,
-			Role:     role,
-		})
-		next.ServeHTTP(w, r.WithContext(ctx))
+		if strings.HasPrefix(authHeader, "API ") {
+			apiKey := strings.TrimPrefix(authHeader, "API ")
+			if apiKey == "" {
+				response.Error(w, http.StatusUnauthorized, "invalid API key format")
+				return
+			}
+
+			var tenantID string
+			err := am.dbPool.QueryRow(r.Context(), "SELECT id FROM master.tenant WHERE api_key = $1", apiKey).Scan(&tenantID)
+			if err != nil {
+				slog.Warn("bot api key authentication failed: invalid api key", "err", err)
+				response.Error(w, http.StatusUnauthorized, "invalid API key")
+				return
+			}
+
+			// Validate x-tenant-id header IF it is sent (optional, but good for validation)
+			headerTenantID := r.Header.Get("x-tenant-id")
+			if headerTenantID != "" && headerTenantID != tenantID {
+				response.Error(w, http.StatusUnauthorized, "tenant mismatch")
+				return
+			}
+
+			ctx := context.WithValue(r.Context(), userContextKey, UserContext{
+				TenantID: tenantID,
+				Role:     "BOT",
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		response.Error(w, http.StatusUnauthorized, "invalid authorization scheme (expected: VC or API)")
 	})
 }

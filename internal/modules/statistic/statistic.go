@@ -172,7 +172,7 @@ func (h *StatisticHandler) GetAllStatistic(w http.ResponseWriter, r *http.Reques
 	err := h.dbPool.QueryRow(r.Context(), periodTotalSql, startDate).Scan(&p.NetIncome, &p.Expense, &p.TransactionCount)
 	if err != nil {
 		slog.Error("failed to query period stats", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database aggregation failed")
+		response.Error(w, http.StatusInternalServerError, "database aggregation failed", err)
 		return
 	}
 	p.CreatedAt = time.Now()
@@ -244,7 +244,7 @@ func (h *StatisticHandler) GetAllStatistic(w http.ResponseWriter, r *http.Reques
 	rows, err := h.dbPool.Query(r.Context(), breakdownSql, startDate)
 	if err != nil {
 		slog.Error("failed to query daily/monthly breakdown stats", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database breakdown query failed")
+		response.Error(w, http.StatusInternalServerError, "database breakdown query failed", err)
 		return
 	}
 	defer rows.Close()
@@ -255,7 +255,7 @@ func (h *StatisticHandler) GetAllStatistic(w http.ResponseWriter, r *http.Reques
 		err = rows.Scan(&ds.Date, &ds.NetIncome, &ds.Expense, &ds.TransactionCount, &ds.CreatedAt)
 		if err != nil {
 			slog.Error("failed to scan daily stats", "err", err)
-			response.Error(w, http.StatusInternalServerError, "scan failed")
+			response.Error(w, http.StatusInternalServerError, "scan failed", err)
 			return
 		}
 		ds.UpdatedAt = ds.CreatedAt
@@ -300,7 +300,7 @@ func (h *StatisticHandler) GetAllStatistic(w http.ResponseWriter, r *http.Reques
 	pRows, err := h.dbPool.Query(r.Context(), productSql, startDate)
 	if err != nil {
 		slog.Error("failed to query product sales stats", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database product query failed")
+		response.Error(w, http.StatusInternalServerError, "database product query failed", err)
 		return
 	}
 	defer pRows.Close()
@@ -310,7 +310,7 @@ func (h *StatisticHandler) GetAllStatistic(w http.ResponseWriter, r *http.Reques
 		err = pRows.Scan(&ps.ProductVariantID, &ps.ItemsSold, &ps.ProductVariant.Name, &ps.ProductVariant.Product.ID, &ps.ProductVariant.Product.Name)
 		if err != nil {
 			slog.Error("failed to scan product stats row", "err", err)
-			response.Error(w, http.StatusInternalServerError, "scan failed")
+			response.Error(w, http.StatusInternalServerError, "scan failed", err)
 			return
 		}
 		ps.ProductVariant.ID = ps.ProductVariantID
@@ -345,7 +345,7 @@ func (h *StatisticHandler) GetAllStatistic(w http.ResponseWriter, r *http.Reques
 	platRows, err := h.dbPool.Query(r.Context(), platformSql, startDate)
 	if err != nil {
 		slog.Error("failed to query platform stats", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database platform query failed")
+		response.Error(w, http.StatusInternalServerError, "database platform query failed", err)
 		return
 	}
 	defer platRows.Close()
@@ -354,7 +354,7 @@ func (h *StatisticHandler) GetAllStatistic(w http.ResponseWriter, r *http.Reques
 		var pl PlatformStats
 		if err := platRows.Scan(&pl.Platform, &pl.TransactionCount); err != nil {
 			slog.Error("failed to scan platform stats row", "err", err)
-			response.Error(w, http.StatusInternalServerError, "scan failed")
+			response.Error(w, http.StatusInternalServerError, "scan failed", err)
 			return
 		}
 		platStats = append(platStats, pl)
@@ -375,7 +375,7 @@ func (h *StatisticHandler) GetAllStatistic(w http.ResponseWriter, r *http.Reques
 	peakRows, err := h.dbPool.Query(r.Context(), peakHourSql, startDate)
 	if err != nil {
 		slog.Error("failed to query peak hour stats", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database peak hour query failed")
+		response.Error(w, http.StatusInternalServerError, "database peak hour query failed", err)
 		return
 	}
 	defer peakRows.Close()
@@ -384,7 +384,7 @@ func (h *StatisticHandler) GetAllStatistic(w http.ResponseWriter, r *http.Reques
 		var ph PeakHourStats
 		if err := peakRows.Scan(&ph.Hour, &ph.TransactionCount); err != nil {
 			slog.Error("failed to scan peak hour stats row", "err", err)
-			response.Error(w, http.StatusInternalServerError, "scan failed")
+			response.Error(w, http.StatusInternalServerError, "scan failed", err)
 			return
 		}
 		peakStats = append(peakStats, ph)

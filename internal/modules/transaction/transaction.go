@@ -70,11 +70,12 @@ type EmailInfo struct {
 }
 
 type VariantInfo struct {
-	ID        int64        `json:"id,string"`
-	Name      string       `json:"name"`
-	BasePrice int64        `json:"base_price"`
-	ProductID int64        `json:"product_id,string"`
-	Product   *ProductInfo `json:"product,omitempty"`
+	ID           int64        `json:"id,string"`
+	Name         string       `json:"name"`
+	BasePrice    int64        `json:"base_price"`
+	ProductID    int64        `json:"product_id,string"`
+	CopyTemplate *string      `json:"copy_template,omitempty"`
+	Product      *ProductInfo `json:"product,omitempty"`
 }
 
 type ProductInfo struct {
@@ -263,7 +264,7 @@ func (h *TransactionHandler) FindAllTransactions(w http.ResponseWriter, r *http.
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
 		slog.Error("failed to count transactions", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
@@ -279,7 +280,7 @@ func (h *TransactionHandler) FindAllTransactions(w http.ResponseWriter, r *http.
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
 		slog.Error("failed to query transactions", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()
@@ -300,16 +301,83 @@ func (h *TransactionHandler) FindAllTransactions(w http.ResponseWriter, r *http.
 		}
 
 		itemRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
-			SELECT id, price, account_id, account_user_id, product_id, product_variant_id, created_at, transaction_id
-			FROM "%s".transaction_item_ts
-			WHERE transaction_id = ANY($1)
-		`, tenantID), txIDs)
+			SELECT ti.id, ti.price, ti.account_id, ti.account_user_id, ti.product_id, ti.product_variant_id, ti.created_at, ti.transaction_id,
+			       au.name, au.status, au.expired_at, ap.name, a.account_password, a.subscription_expiry, a.status,
+			       e.email, pv.name, pv.copy_template, p.name
+			FROM "%s".transaction_item_ts ti
+			LEFT JOIN "%s".account_user au ON ti.account_user_id = au.id
+			LEFT JOIN "%s".account_profile ap ON au.account_profile_id = ap.id
+			LEFT JOIN "%s".account a ON ti.account_id = a.id
+			LEFT JOIN "%s".email e ON a.email_id = e.id
+			LEFT JOIN "%s".product_variant pv ON ti.product_variant_id = pv.id
+			LEFT JOIN "%s".product p ON ti.product_id = p.id
+			WHERE ti.transaction_id = ANY($1)
+		`, tenantID, tenantID, tenantID, tenantID, tenantID, tenantID, tenantID), txIDs)
 		if err == nil {
 			defer itemRows.Close()
 			itemMap := make(map[string][]TransactionItem)
 			for itemRows.Next() {
 				var it TransactionItem
-				if err := itemRows.Scan(&it.ID, &it.Price, &it.AccountID, &it.AccountUserID, &it.ProductID, &it.ProductVariantID, &it.CreatedAt, &it.TransactionID); err == nil {
+				var u UserInfo
+				var ap ProfileInfo
+				var a AccountInfo
+				var e EmailInfo
+				var pv VariantInfo
+				var p ProductInfo
+
+				var uName, uStatus, apName, aPass, aStatus, eMail, pvName, pvCopyTemplate, pName sql.NullString
+				var expTime, subExpiry sql.NullTime
+
+				err = itemRows.Scan(
+					&it.ID, &it.Price, &it.AccountID, &it.AccountUserID, &it.ProductID, &it.ProductVariantID, &it.CreatedAt, &it.TransactionID,
+					&uName, &uStatus, &expTime, &apName, &aPass, &subExpiry, &aStatus,
+					&eMail, &pvName, &pvCopyTemplate, &pName,
+				)
+				if err == nil {
+					if it.AccountUserID != nil && uName.Valid {
+						u.ID = *it.AccountUserID
+						u.Name = uName.String
+						u.Status = uStatus.String
+						if expTime.Valid {
+							u.ExpiredAt = &expTime.Time
+						}
+						if it.AccountID != nil {
+							u.AccountID = *it.AccountID
+						}
+
+						if apName.Valid {
+							ap.Name = apName.String
+							u.Profile = &ap
+						}
+
+						if aPass.Valid {
+							a.ID = u.AccountID
+							a.AccountPassword = aPass.String
+							if subExpiry.Valid {
+								a.SubscriptionExpiry = subExpiry.Time
+							}
+							a.Status = aStatus.String
+
+							if eMail.Valid {
+								e.Email = eMail.String
+								a.Email = &e
+							}
+
+							if pvName.Valid {
+								pv.Name = pvName.String
+								if pvCopyTemplate.Valid {
+									pv.CopyTemplate = &pvCopyTemplate.String
+								}
+								if pName.Valid {
+									p.Name = pName.String
+									pv.Product = &p
+								}
+								a.ProductVariant = &pv
+							}
+							u.Account = &a
+						}
+						it.User = &u
+					}
 					itemMap[it.TransactionID] = append(itemMap[it.TransactionID], it)
 				}
 			}
@@ -338,7 +406,7 @@ func (h *TransactionHandler) FindOneTransaction(w http.ResponseWriter, r *http.R
 	`, tenantID), id).Scan(&t.ID, &t.Customer, &t.Platform, &t.TotalPrice, &t.CreatedAt)
 
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("transaction dengan id: %s tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("transaction dengan id: %s tidak ditemukan", id), err)
 		return
 	}
 
@@ -346,7 +414,7 @@ func (h *TransactionHandler) FindOneTransaction(w http.ResponseWriter, r *http.R
 	rows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
 		SELECT ti.id, ti.price, ti.account_id, ti.account_user_id, ti.product_id, ti.product_variant_id, ti.created_at,
 		       au.name, au.status, au.expired_at, ap.name, a.account_password, a.subscription_expiry, a.status,
-		       e.email, pv.name, p.name
+		       e.email, pv.name, pv.copy_template, p.name
 		FROM "%s".transaction_item_ts ti
 		LEFT JOIN "%s".account_user au ON ti.account_user_id = au.id
 		LEFT JOIN "%s".account_profile ap ON au.account_profile_id = ap.id
@@ -368,13 +436,13 @@ func (h *TransactionHandler) FindOneTransaction(w http.ResponseWriter, r *http.R
 			var pv VariantInfo
 			var p ProductInfo
 
-			var uName, uStatus, apName, aPass, aStatus, eMail, pvName, pName sql.NullString
+			var uName, uStatus, apName, aPass, aStatus, eMail, pvName, pvCopyTemplate, pName sql.NullString
 			var expTime, subExpiry sql.NullTime
 
 			err = rows.Scan(
 				&it.ID, &it.Price, &it.AccountID, &it.AccountUserID, &it.ProductID, &it.ProductVariantID, &it.CreatedAt,
 				&uName, &uStatus, &expTime, &apName, &aPass, &subExpiry, &aStatus,
-				&eMail, &pvName, &pName,
+				&eMail, &pvName, &pvCopyTemplate, &pName,
 			)
 			if err == nil {
 				it.TransactionID = id
@@ -410,6 +478,9 @@ func (h *TransactionHandler) FindOneTransaction(w http.ResponseWriter, r *http.R
 
 						if pvName.Valid {
 							pv.Name = pvName.String
+							if pvCopyTemplate.Valid {
+								pv.CopyTemplate = &pvCopyTemplate.String
+							}
 							if pName.Valid {
 								p.Name = pName.String
 								pv.Product = &p
@@ -454,7 +525,7 @@ func (h *TransactionHandler) CreateTransaction(w http.ResponseWriter, r *http.Re
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -606,7 +677,7 @@ func (h *TransactionHandler) CreateTransaction(w http.ResponseWriter, r *http.Re
 			RETURNING id, name, status, expired_at, account_profile_id, account_id, created_at, updated_at
 		`, tenantID), payload.Customer, finalProfileID, finalAccountID).Scan(&u.ID, &u.Name, &u.Status, &u.ExpiredAt, &u.AccountProfileID, &u.AccountID, &u.CreatedAt, &u.UpdatedAt)
 		if err != nil {
-			response.Error(w, http.StatusInternalServerError, "failed to insert account user")
+			response.Error(w, http.StatusInternalServerError, "failed to insert account user", err)
 			return
 		}
 
@@ -647,7 +718,7 @@ func (h *TransactionHandler) CreateTransaction(w http.ResponseWriter, r *http.Re
 	`, tenantID), transactionID, payload.Customer, payload.Platform, totalPrice).Scan(&t.ID, &t.Customer, &t.Platform, &t.TotalPrice, &t.CreatedAt)
 	if err != nil {
 		slog.Error("failed to create transaction_ts record", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to insert transaction record")
+		response.Error(w, http.StatusInternalServerError, "failed to insert transaction record", err)
 		return
 	}
 
@@ -661,14 +732,14 @@ func (h *TransactionHandler) CreateTransaction(w http.ResponseWriter, r *http.Re
 		`, tenantID), item.TransactionID, item.Price, item.AccountID, item.AccountUserID, item.ProductID, item.ProductVariantID).Scan(&id)
 		if err != nil {
 			slog.Error("failed to insert transaction_item_ts", "err", err)
-			response.Error(w, http.StatusInternalServerError, "failed to insert transaction items")
+			response.Error(w, http.StatusInternalServerError, "failed to insert transaction items", err)
 			return
 		}
 		transactionItems[i].ID = id
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -702,7 +773,7 @@ func (h *TransactionHandler) UpdateTransaction(w http.ResponseWriter, r *http.Re
 			FROM "%s".transaction_ts WHERE id = $1
 		`, tenantID), id).Scan(&updated.ID, &updated.Customer, &updated.Platform, &updated.TotalPrice, &updated.CreatedAt)
 		if err != nil {
-			response.Error(w, http.StatusNotFound, fmt.Sprintf("transaction dengan id: %s tidak ditemukan", id))
+			response.Error(w, http.StatusNotFound, fmt.Sprintf("transaction dengan id: %s tidak ditemukan", id), err)
 			return
 		}
 		response.JSON(w, http.StatusOK, updated)
@@ -711,7 +782,7 @@ func (h *TransactionHandler) UpdateTransaction(w http.ResponseWriter, r *http.Re
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -760,7 +831,7 @@ func (h *TransactionHandler) UpdateTransaction(w http.ResponseWriter, r *http.Re
 	res, err := tx.Exec(r.Context(), query, args...)
 	if err != nil {
 		slog.Error("failed to update transaction", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to update transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to update transaction", err)
 		return
 	}
 
@@ -770,7 +841,7 @@ func (h *TransactionHandler) UpdateTransaction(w http.ResponseWriter, r *http.Re
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -790,7 +861,7 @@ func (h *TransactionHandler) RemoveTransaction(w http.ResponseWriter, r *http.Re
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -798,23 +869,23 @@ func (h *TransactionHandler) RemoveTransaction(w http.ResponseWriter, r *http.Re
 	// Delete from transaction_ts (cascade deletes items since we run it in transaction, wait! No foreign keys on hypertable usually, we delete manually)
 	res, err := tx.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".transaction_ts WHERE id = $1`, tenantID), id)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to delete transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to delete transaction", err)
 		return
 	}
 
 	if res.RowsAffected() == 0 {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("transaction dengan id: %s tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("transaction dengan id: %s tidak ditemukan", id), err)
 		return
 	}
 
 	_, err = tx.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".transaction_item_ts WHERE transaction_id = $1`, tenantID), id)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to delete transaction items")
+		response.Error(w, http.StatusInternalServerError, "failed to delete transaction items", err)
 		return
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -856,7 +927,7 @@ func (h *TransactionHandler) FindAllExpenses(w http.ResponseWriter, r *http.Requ
 	if subjectIDStr != "" {
 		subjectID, err := strconv.ParseInt(subjectIDStr, 10, 64)
 		if err != nil {
-			response.Error(w, http.StatusBadRequest, "invalid subject_id format")
+			response.Error(w, http.StatusBadRequest, "invalid subject_id format", err)
 			return
 		}
 		whereClauses = append(whereClauses, fmt.Sprintf("subject_id = $%d", argIdx))
@@ -876,7 +947,7 @@ func (h *TransactionHandler) FindAllExpenses(w http.ResponseWriter, r *http.Requ
 	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
 		slog.Error("failed to count expenses", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
@@ -892,7 +963,7 @@ func (h *TransactionHandler) FindAllExpenses(w http.ResponseWriter, r *http.Requ
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
 		slog.Error("failed to query expenses", "err", err)
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()
@@ -901,7 +972,7 @@ func (h *TransactionHandler) FindAllExpenses(w http.ResponseWriter, r *http.Requ
 		var ex Expense
 		err = rows.Scan(&ex.ID, &ex.SubjectID, &ex.Type, &ex.Amount, &ex.Note, &ex.CreatedAt)
 		if err != nil {
-			response.Error(w, http.StatusInternalServerError, "database scan failed")
+			response.Error(w, http.StatusInternalServerError, "database scan failed", err)
 			return
 		}
 		expenses = append(expenses, ex)
@@ -922,7 +993,7 @@ func (h *TransactionHandler) FindOneExpense(w http.ResponseWriter, r *http.Reque
 	`, tenantID), id).Scan(&ex.ID, &ex.SubjectID, &ex.Type, &ex.Amount, &ex.Note, &ex.CreatedAt)
 
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("expense dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("expense dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
@@ -943,7 +1014,7 @@ func (h *TransactionHandler) CreateExpense(w http.ResponseWriter, r *http.Reques
 
 	if err != nil {
 		slog.Error("failed to create expense", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to insert expense")
+		response.Error(w, http.StatusInternalServerError, "failed to insert expense", err)
 		return
 	}
 
@@ -963,7 +1034,7 @@ func (h *TransactionHandler) UpdateExpense(w http.ResponseWriter, r *http.Reques
 			FROM "%s".expense WHERE id = $1
 		`, tenantID), id).Scan(&ex.ID, &ex.SubjectID, &ex.Type, &ex.Amount, &ex.Note, &ex.CreatedAt)
 		if err != nil {
-			response.Error(w, http.StatusNotFound, fmt.Sprintf("expense dengan id: %d tidak ditemukan", id))
+			response.Error(w, http.StatusNotFound, fmt.Sprintf("expense dengan id: %d tidak ditemukan", id), err)
 			return
 		}
 		response.JSON(w, http.StatusOK, ex)
@@ -979,13 +1050,13 @@ func (h *TransactionHandler) UpdateExpense(w http.ResponseWriter, r *http.Reques
 		SELECT type, amount, subject_id, note FROM "%s".expense WHERE id = $1
 	`, tenantID), id).Scan(&currentType, &currentAmount, &currentSubject, &currentNote)
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("expense dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("expense dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -1024,12 +1095,12 @@ func (h *TransactionHandler) UpdateExpense(w http.ResponseWriter, r *http.Reques
 	_, err = tx.Exec(r.Context(), query, args...)
 	if err != nil {
 		slog.Error("failed to update expense", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to update expense")
+		response.Error(w, http.StatusInternalServerError, "failed to update expense", err)
 		return
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -1049,12 +1120,12 @@ func (h *TransactionHandler) RemoveExpense(w http.ResponseWriter, r *http.Reques
 
 	res, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".expense WHERE id = $1`, tenantID), id)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to delete expense")
+		response.Error(w, http.StatusInternalServerError, "failed to delete expense", err)
 		return
 	}
 
 	if res.RowsAffected() == 0 {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("expense dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("expense dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
@@ -1076,7 +1147,7 @@ func (h *TransactionHandler) FindAllEmailSubjects(w http.ResponseWriter, r *http
 	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".email_subject`, tenantID)
 	err := h.dbPool.QueryRow(r.Context(), countQuery).Scan(&total)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "database count failed")
+		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
@@ -1089,7 +1160,7 @@ func (h *TransactionHandler) FindAllEmailSubjects(w http.ResponseWriter, r *http
 
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, limit, offset)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "database query failed")
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()
@@ -1098,7 +1169,7 @@ func (h *TransactionHandler) FindAllEmailSubjects(w http.ResponseWriter, r *http
 		var s EmailSubject
 		err = rows.Scan(&s.ID, &s.Context, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
 		if err != nil {
-			response.Error(w, http.StatusInternalServerError, "database scan failed")
+			response.Error(w, http.StatusInternalServerError, "database scan failed", err)
 			return
 		}
 		subs = append(subs, s)
@@ -1119,7 +1190,7 @@ func (h *TransactionHandler) FindOneEmailSubject(w http.ResponseWriter, r *http.
 	`, tenantID), id).Scan(&s.ID, &s.Context, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
 
 	if err != nil {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("emailSubject dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("emailSubject dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 
@@ -1139,7 +1210,7 @@ func (h *TransactionHandler) CreateEmailSubject(w http.ResponseWriter, r *http.R
 	`, tenantID), payload.Context, payload.Subject, payload.ExtractMethod).Scan(&s.ID, &s.Context, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
 
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to insert email subject")
+		response.Error(w, http.StatusInternalServerError, "failed to insert email subject", err)
 		return
 	}
 
@@ -1154,7 +1225,7 @@ func (h *TransactionHandler) UpdateEmailSubject(w http.ResponseWriter, r *http.R
 
 	tx, err := h.dbPool.Begin(r.Context())
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to start transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to start transaction", err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -1187,7 +1258,7 @@ func (h *TransactionHandler) UpdateEmailSubject(w http.ResponseWriter, r *http.R
 	res, err := tx.Exec(r.Context(), query, args...)
 	if err != nil {
 		slog.Error("failed to update email subject", "err", err)
-		response.Error(w, http.StatusInternalServerError, "failed to update email subject")
+		response.Error(w, http.StatusInternalServerError, "failed to update email subject", err)
 		return
 	}
 
@@ -1197,7 +1268,7 @@ func (h *TransactionHandler) UpdateEmailSubject(w http.ResponseWriter, r *http.R
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to commit transaction")
+		response.Error(w, http.StatusInternalServerError, "failed to commit transaction", err)
 		return
 	}
 
@@ -1217,12 +1288,12 @@ func (h *TransactionHandler) RemoveEmailSubject(w http.ResponseWriter, r *http.R
 
 	res, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`DELETE FROM "%s".email_subject WHERE id = $1`, tenantID), id)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "failed to delete email subject")
+		response.Error(w, http.StatusInternalServerError, "failed to delete email subject", err)
 		return
 	}
 
 	if res.RowsAffected() == 0 {
-		response.Error(w, http.StatusNotFound, fmt.Sprintf("emailSubject dengan id: %d tidak ditemukan", id))
+		response.Error(w, http.StatusNotFound, fmt.Sprintf("emailSubject dengan id: %d tidak ditemukan", id), err)
 		return
 	}
 

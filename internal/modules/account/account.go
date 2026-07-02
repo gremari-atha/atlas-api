@@ -21,26 +21,26 @@ import (
 
 // DB models
 type Account struct {
-	ID                 int64           `json:"id,string"`
-	AccountPassword    string          `json:"account_password"`
-	SubscriptionExpiry time.Time       `json:"subscription_expiry"`
-	Status             string          `json:"status"`
-	Billing            string          `json:"billing"`
-	BatchStartDate     *time.Time      `json:"batch_start_date"`
-	BatchEndDate       *time.Time      `json:"batch_end_date"`
-	EmailID            int64           `json:"email_id,string"`
-	ProductVariantID   int64           `json:"product_variant_id,string"`
-	FreezeUntil        *time.Time      `json:"freeze_until"`
-	Pinned             bool            `json:"pinned"`
-	CreatedAt          time.Time       `json:"created_at"`
-	UpdatedAt          time.Time       `json:"updated_at"`
-	Email              *EmailInfo      `json:"email,omitempty"`
-	ProductVariant     *VariantInfo    `json:"product_variant,omitempty"`
-	Profile            []ProfileInfo   `json:"profile,omitempty"`
-	Modifier           []ModifierInfo  `json:"modifier,omitempty"`
-	ProfileCount       int             `json:"profile_count,omitempty"`
-	MaxUser            int             `json:"max_user,omitempty"`
-	UserCount          int             `json:"user_count,omitempty"`
+	ID                 int64          `json:"id,string"`
+	AccountPassword    string         `json:"account_password"`
+	SubscriptionExpiry time.Time      `json:"subscription_expiry"`
+	Status             string         `json:"status"`
+	Billing            string         `json:"billing"`
+	BatchStartDate     *time.Time     `json:"batch_start_date"`
+	BatchEndDate       *time.Time     `json:"batch_end_date"`
+	EmailID            int64          `json:"email_id,string"`
+	ProductVariantID   int64          `json:"product_variant_id,string"`
+	FreezeUntil        *time.Time     `json:"freeze_until"`
+	Pinned             bool           `json:"pinned"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
+	Email              *EmailInfo     `json:"email,omitempty"`
+	ProductVariant     *VariantInfo   `json:"product_variant,omitempty"`
+	Profile            []ProfileInfo  `json:"profile,omitempty"`
+	Modifier           []ModifierInfo `json:"modifier,omitempty"`
+	ProfileCount       int            `json:"profile_count,omitempty"`
+	MaxUser            int            `json:"max_user,omitempty"`
+	UserCount          int            `json:"user_count,omitempty"`
 }
 
 type EmailInfo struct {
@@ -62,15 +62,15 @@ type ProductInfo struct {
 }
 
 type ProfileInfo struct {
-	ID             int64      `json:"id,string"`
-	Name           string     `json:"name"`
-	MaxUser        int        `json:"max_user"`
-	AllowGenerate  bool       `json:"allow_generate"`
-	Metadata       *string    `json:"metadata"`
-	AccountID      int64      `json:"account_id,string"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	User           []UserInfo `json:"user,omitempty"`
+	ID            int64      `json:"id,string"`
+	Name          string     `json:"name"`
+	MaxUser       int        `json:"max_user"`
+	AllowGenerate bool       `json:"allow_generate"`
+	Metadata      *string    `json:"metadata"`
+	AccountID     int64      `json:"account_id,string"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	User          []UserInfo `json:"user,omitempty"`
 }
 
 type UserInfo struct {
@@ -1294,7 +1294,7 @@ func (h *AccountHandler) registerModifiersToTaskQueue(tenantID string, accountID
 			// Job 1: D-Day at 7:00 AM
 			dday := time.Date(expiry.Year(), expiry.Month(), expiry.Day(), 7, 0, 0, 0, expiry.Location())
 			ddayFormatted := expiry.Format("2006-01-02")
-			
+
 			payload1 := scheduler.BasePayload[scheduler.AccountSubsEndNotifyPayload]{
 				TenantID: tenantID,
 				Data: scheduler.AccountSubsEndNotifyPayload{
@@ -1318,7 +1318,7 @@ func (h *AccountHandler) registerModifiersToTaskQueue(tenantID string, accountID
 				continue
 			}
 			executeAt = *batchEnd
-			
+
 			// Get account password
 			var accPass string
 			_ = h.dbPool.QueryRow(context.Background(), fmt.Sprintf(`SELECT account_password FROM "%s".account WHERE id = $1`, tenantID), accountID).Scan(&accPass)
@@ -1721,7 +1721,7 @@ func (h *AccountHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	if payload.AccountProfileID != nil {
 		// Specific profile ID provided
 		finalProfileID = *payload.AccountProfileID
-		
+
 		// Check that profile exists and has available slots
 		var maxUser, currentUserCount int
 		err = tx.QueryRow(r.Context(), fmt.Sprintf(`

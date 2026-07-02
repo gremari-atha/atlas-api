@@ -90,7 +90,7 @@ func main() {
 		slog.Error("failed to get tenant token", "err", err)
 		os.Exit(1)
 	}
-	
+
 	var tokenData map[string]string
 	if err := json.Unmarshal([]byte(tokenRespBody), &tokenData); err != nil {
 		slog.Error("failed to parse token json", "err", err)
@@ -201,20 +201,20 @@ func main() {
 	createAccReq := map[string]interface{}{
 		"account_password":    "secureNetflixPassword123!",
 		"subscription_expiry": time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339),
-		"status":             "active",
-		"billing":            "monthly",
+		"status":              "active",
+		"billing":             "monthly",
 		"email_id":            fmt.Sprintf("%d", emailID), // string ID
-		"product_variant_id":   varIDStr,
-		"pinned":             true,
+		"product_variant_id":  varIDStr,
+		"pinned":              true,
 		"profile": []map[string]interface{}{
 			{
-				"name":          "Screen Alpha",
-				"max_user":      4,
+				"name":           "Screen Alpha",
+				"max_user":       4,
 				"allow_generate": true,
 			},
 			{
-				"name":          "Screen Beta",
-				"max_user":      4,
+				"name":           "Screen Beta",
+				"max_user":       4,
 				"allow_generate": true,
 			},
 		},

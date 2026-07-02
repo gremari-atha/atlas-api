@@ -55,7 +55,7 @@ type CreateProductPayload struct {
 }
 
 type CreateProductWithVariantPayload struct {
-	Name     string                 `json:"name" validate:"required"`
+	Name     string                `json:"name" validate:"required"`
 	Variants []CreateVariantNested `json:"variants" validate:"required,dive"`
 }
 

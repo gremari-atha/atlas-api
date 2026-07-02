@@ -18,14 +18,14 @@ import (
 	"atlas-api/internal/websocket"
 
 	"atlas-api/internal/modules/account"
-	"atlas-api/internal/modules/logger"
-	"atlas-api/internal/modules/product"
+	"atlas-api/internal/modules/bot"
 	"atlas-api/internal/modules/email"
 	"atlas-api/internal/modules/emailforward"
+	"atlas-api/internal/modules/logger"
+	"atlas-api/internal/modules/product"
 	"atlas-api/internal/modules/statistic"
 	"atlas-api/internal/modules/tenant"
 	"atlas-api/internal/modules/transaction"
-	"atlas-api/internal/modules/bot"
 
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
@@ -124,15 +124,21 @@ func main() {
 		_, _ = w.Write([]byte("Hello World!"))
 	})
 
-	// WebSocket Endpoint
-	r.Get("/ws", wsHub.AuthenticateAndUpgrade)
-
 	// Construct Auth Middleware
 	superadminSecret := os.Getenv("SUPERADMIN_JWT_SECRET")
 	if superadminSecret == "" {
 		superadminSecret = "superadminsecret" // fallback default
 	}
 	auth := middleware.NewAuthMiddleware(dbPool, superadminSecret)
+
+	// WebSocket Endpoint
+	r.Get("/ws", wsHub.AuthenticateAndUpgrade)
+
+	// Socket Task Dispatch Endpoint
+	r.Route("/socket", func(r chi.Router) {
+		r.Use(auth.TenantAuth)
+		r.Post("/dispatch-task", wsHub.DispatchTaskHandler)
+	})
 
 	// Register Business Modules
 	tenantHandler := tenant.NewTenantHandler(dbPool)
@@ -235,7 +241,7 @@ func main() {
 	emailForwardWorker.Stop()
 
 	cancel() // cancel root context to notify background routines
-	
+
 	// Wait or force exit if timeout is exceeded
 	<-shutdownCtx.Done()
 	slog.Info("atlas server stopped cleanly")

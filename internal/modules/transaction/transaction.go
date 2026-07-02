@@ -28,15 +28,15 @@ type Transaction struct {
 }
 
 type TransactionItem struct {
-	ID               int64      `json:"id,string"`
-	TransactionID    string     `json:"transaction_id"`
-	Price            int64      `json:"price"`
-	AccountID        *int64     `json:"account_id,string"`
-	AccountUserID    *int64     `json:"account_user_id,string"`
-	ProductID        *int64     `json:"product_id,string"`
-	ProductVariantID *int64     `json:"product_variant_id,string"`
-	CreatedAt        time.Time  `json:"created_at"`
-	User             *UserInfo  `json:"user,omitempty"`
+	ID               int64     `json:"id,string"`
+	TransactionID    string    `json:"transaction_id"`
+	Price            int64     `json:"price"`
+	AccountID        *int64    `json:"account_id,string"`
+	AccountUserID    *int64    `json:"account_user_id,string"`
+	ProductID        *int64    `json:"product_id,string"`
+	ProductVariantID *int64    `json:"product_variant_id,string"`
+	CreatedAt        time.Time `json:"created_at"`
+	User             *UserInfo `json:"user,omitempty"`
 }
 
 type UserInfo struct {
@@ -108,9 +108,9 @@ type EmailSubject struct {
 
 // Payloads
 type CreateTransactionPayload struct {
-	ID       string                   `json:"id"` // optional client-generated snowflake ID
-	Customer string                   `json:"customer" validate:"required"`
-	Platform string                   `json:"platform" validate:"required"`
+	ID       string                  `json:"id"` // optional client-generated snowflake ID
+	Customer string                  `json:"customer" validate:"required"`
+	Platform string                  `json:"platform" validate:"required"`
 	Items    []CreateTransactionItem `json:"items" validate:"required,dive"`
 }
 

@@ -59,4 +59,3 @@ func GetEnvAsDurationMs(key string, defaultVal time.Duration) time.Duration {
 	}
 	return time.Duration(val) * time.Millisecond
 }
-

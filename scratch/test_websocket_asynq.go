@@ -43,7 +43,7 @@ func main() {
 
 	// 2. Clear and Seed DB
 	slog.Info("seeding database with test tenant, products, emails, and accounts...")
-	
+
 	// Seed master.tenant
 	_, err = importPool.Exec(ctx, `
 		INSERT INTO master.tenant (id, secret) 

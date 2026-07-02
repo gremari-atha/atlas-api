@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"atlas-api/internal/config"
+	"atlas-api/internal/middleware"
+	"atlas-api/internal/response"
 )
 
 var upgrader = websocket.Upgrader{
@@ -25,6 +28,12 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true // Allow all origins for simplicity
 	},
+}
+
+type TaskCachedStatus struct {
+	Status       string
+	ErrorMessage string
+	Timestamp    time.Time
 }
 
 // Hub maintains the set of active clients and broadcasts messages to clients.
@@ -37,6 +46,7 @@ type Hub struct {
 	mutex      sync.RWMutex
 	dbTimeout  time.Duration
 	taskBots   map[string]string // taskId -> clientId
+	taskCache  map[string]TaskCachedStatus
 }
 
 // NewHub constructs a new Connection Hub
@@ -49,6 +59,7 @@ func NewHub(dbPool *pgxpool.Pool) *Hub {
 		events:     make(map[string]map[string]*Client),
 		dbTimeout:  config.GetEnvAsDurationMs("DB_TIMEOUT", 5000*time.Millisecond),
 		taskBots:   make(map[string]string),
+		taskCache:  make(map[string]TaskCachedStatus),
 	}
 }
 
@@ -329,8 +340,10 @@ func (h *Hub) handleIncomingEvent(client *Client, msg IncomingWSMessage) {
 			TaskID string `json:"taskId"`
 		}
 		if err := json.Unmarshal(msg.Data, &data); err != nil {
+			slog.Error("failed to unmarshal task-accept data", "client_name", client.Name, "err", err)
 			return
 		}
+		slog.Info("task-accept received", "client_name", client.Name, "taskId", data.TaskID)
 		h.handleTaskAccepted(client, data.TaskID)
 
 	case "task-reject":
@@ -339,8 +352,10 @@ func (h *Hub) handleIncomingEvent(client *Client, msg IncomingWSMessage) {
 			Message string `json:"message"`
 		}
 		if err := json.Unmarshal(msg.Data, &data); err != nil {
+			slog.Error("failed to unmarshal task-reject data", "client_name", client.Name, "err", err)
 			return
 		}
+		slog.Warn("task-reject received", "client_name", client.Name, "taskId", data.TaskID, "message", data.Message)
 		h.handleTaskRejected(client, data.TaskID, data.Message)
 
 	case "task-done":
@@ -350,8 +365,10 @@ func (h *Hub) handleIncomingEvent(client *Client, msg IncomingWSMessage) {
 			Message string `json:"message"`
 		}
 		if err := json.Unmarshal(msg.Data, &data); err != nil {
+			slog.Error("failed to unmarshal task-done data", "client_name", client.Name, "err", err)
 			return
 		}
+		slog.Info("task-done received", "client_name", client.Name, "taskId", data.TaskID, "status", data.Status, "message", data.Message)
 		h.handleTaskDone(client, data.TaskID, data.Status, data.Message)
 
 	case "subscribe-event":
@@ -554,7 +571,35 @@ func (h *Hub) subscribe(client *Client, eventName string) {
 		h.events[eventName] = subs
 	}
 	subs[client.ID] = client
-	slog.Debug("client subscribed to event", "client_id", client.ID, "event", eventName)
+	slog.Info("client subscribed to event", "client_id", client.ID, "event", eventName)
+
+	if strings.HasPrefix(eventName, "command:status:") {
+		taskId := strings.TrimPrefix(eventName, "command:status:")
+		if cached, exists := h.taskCache[taskId]; exists {
+			slog.Info("found cached task status, replaying to client", "client_id", client.ID, "taskId", taskId, "status", cached.Status)
+			payload := map[string]interface{}{
+				"event":         "task-done",
+				"taskId":        taskId,
+				"status":        cached.Status,
+				"error_message": cached.ErrorMessage,
+			}
+			msg := map[string]interface{}{
+				"event": "event",
+				"data": map[string]interface{}{
+					"eventName": eventName,
+					"payload":   payload,
+				},
+			}
+			bytes, err := json.Marshal(msg)
+			if err == nil {
+				select {
+				case client.Send <- bytes:
+				default:
+					slog.Warn("failed to send cached status to client, send buffer full", "client_id", client.ID)
+				}
+			}
+		}
+	}
 }
 
 func (h *Hub) unsubscribe(client *Client, eventName string) {
@@ -604,6 +649,11 @@ func (h *Hub) handleTaskRejected(client *Client, taskId string, message string) 
 		client.Inflight = 0
 	}
 	delete(h.taskBots, taskId)
+	h.taskCache[taskId] = TaskCachedStatus{
+		Status:       "FAILED",
+		ErrorMessage: message,
+		Timestamp:    time.Now(),
+	}
 	h.mutex.Unlock()
 
 	isDbTask := regexp.MustCompile(`^\d+$`).MatchString(taskId)
@@ -626,6 +676,13 @@ func (h *Hub) handleTaskRejected(client *Client, taskId string, message string) 
 		"status":        "FAILED",
 		"error_message": message,
 	})
+
+	h.BroadcastEvent("command:status:"+taskId, map[string]interface{}{
+		"event":         "task-done",
+		"taskId":        taskId,
+		"status":        "FAILED",
+		"error_message": message,
+	})
 }
 
 func (h *Hub) handleTaskDone(client *Client, taskId string, status string, message string) {
@@ -635,6 +692,11 @@ func (h *Hub) handleTaskDone(client *Client, taskId string, status string, messa
 		client.Inflight = 0
 	}
 	delete(h.taskBots, taskId)
+	h.taskCache[taskId] = TaskCachedStatus{
+		Status:       status,
+		ErrorMessage: message,
+		Timestamp:    time.Now(),
+	}
 	h.mutex.Unlock()
 
 	isDbTask := regexp.MustCompile(`^\d+$`).MatchString(taskId)
@@ -714,4 +776,57 @@ func (h *Hub) ForwardToBot(tenantID string, botName string, message []byte) erro
 		}
 	}
 	return fmt.Errorf("bot '%s' is not connected", botName)
+}
+
+func (h *Hub) DispatchTaskHandler(w http.ResponseWriter, r *http.Request) {
+	uCtx, ok := middleware.GetUserContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req struct {
+		TaskID string `json:"taskId"`
+		Data   struct {
+			Module     string `json:"module"`
+			Type       string `json:"type"`
+			ExecuteAt  string `json:"executeAt"`
+			MaxRetries int    `json:"maxRetries"`
+			Payload    string `json:"payload"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	if req.TaskID == "" || req.Data.Module == "" || req.Data.Type == "" {
+		response.Error(w, http.StatusBadRequest, "taskId, data.module, and data.type are required")
+		return
+	}
+
+	var parsedPayload interface{}
+	if err := json.Unmarshal([]byte(req.Data.Payload), &parsedPayload); err != nil {
+		// Fallback to raw string if it is not a valid JSON string
+		parsedPayload = req.Data.Payload
+	}
+
+	botID, err := h.DispatchTask(
+		r.Context(),
+		req.TaskID,
+		uCtx.TenantID,
+		req.Data.Module,
+		req.Data.Type,
+		parsedPayload,
+	)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, err.Error(), err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, map[string]string{
+		"taskId": req.TaskID,
+		"botId":  botID,
+	})
 }

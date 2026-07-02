@@ -151,7 +151,7 @@ func runTenantMigrate(dbURL, command string) {
 
 	for _, tenantID := range tenants {
 		fmt.Printf("Running migration for tenant '%s'...\n", tenantID)
-		
+
 		// Ensure tenant schema exists
 		_, err = db.Exec(fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS "%s"`, tenantID))
 		if err != nil {
@@ -179,7 +179,7 @@ func runTenantMigrate(dbURL, command string) {
 			log.Printf("Failed to initialize migration for tenant %s: %v", tenantID, err)
 			continue
 		}
-		
+
 		executeMigrateCommand(m, fmt.Sprintf("tenant (%s)", tenantID), command)
 		m.Close()
 	}

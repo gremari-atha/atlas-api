@@ -39,7 +39,7 @@ type UpdateTenantPayload struct {
 
 type AccessTokenPayload struct {
 	TenantID string `json:"tenant_id" validate:"required"`
-	Secret   string   `json:"secret" validate:"required"`
+	Secret   string `json:"secret" validate:"required"`
 }
 
 type TenantHandler struct {

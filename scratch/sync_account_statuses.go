@@ -44,7 +44,7 @@ func main() {
 	// 2. Loop through each tenant and sync account statuses
 	for _, tenantID := range tenantIDs {
 		fmt.Printf("Syncing tenant: %s...\n", tenantID)
-		
+
 		query := fmt.Sprintf(`
 			UPDATE "%s".account a
 			SET status = CASE
@@ -80,7 +80,7 @@ func main() {
 			fmt.Printf("Error syncing tenant %s: %v\n", tenantID, err)
 			continue
 		}
-		
+
 		fmt.Printf("Successfully synced tenant %s: %d accounts updated\n", tenantID, res.RowsAffected())
 	}
 

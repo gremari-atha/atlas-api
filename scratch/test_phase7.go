@@ -202,7 +202,7 @@ func main() {
 	// SIMULATE GAS (GOOGLE APPS SCRIPT) FLOW
 	// ==========================================
 	slog.Info("=== SIMULATING GOOGLE APPS SCRIPT (GAS) FLOW ===")
-	
+
 	// 1. Fetch Subjects list
 	slog.Info("GAS fetches subjects list (GET /email-forward/subject?tenant=paytronik)...")
 	subjectsResp, err := sendRequest(http.MethodGet, "/email-forward/subject?tenant="+testTenantID, nil, "", "")

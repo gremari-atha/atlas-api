@@ -28,9 +28,6 @@ COPY --from=builder /app/migrate /app/migrate
 # Copy migrations files
 COPY migrations /app/migrations
 
-# Copy env template
-COPY .env.example /app/.env
-
 # Document the port
 EXPOSE 5000
 

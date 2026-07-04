@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"atlas-api/internal/middleware"
@@ -96,13 +97,25 @@ func (h *EmailHandler) FindAllEmails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Dynamic sorting construction
+	orderByClause := "email ASC"
+	orderBy := r.URL.Query().Get("order_by")
+	orderDir := r.URL.Query().Get("order_direction")
+	if orderBy == "email" {
+		dir := "ASC"
+		if strings.ToUpper(orderDir) == "DESC" {
+			dir = "DESC"
+		}
+		orderByClause = fmt.Sprintf("email %s", dir)
+	}
+
 	selectQuery := fmt.Sprintf(`
 		SELECT id, email, password, created_at, updated_at 
 		FROM "%s".email 
 		%s 
-		ORDER BY email ASC 
+		ORDER BY %s 
 		LIMIT $%d OFFSET $%d
-	`, tenantID, whereClause, len(args)+1, len(args)+2)
+	`, tenantID, whereClause, orderByClause, len(args)+1, len(args)+2)
 
 	selectArgs := append(args, limit, offset)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	"atlas-api/internal/websocket"
 
@@ -59,6 +60,27 @@ func (w *WorkerServer) Shutdown() {
 	w.asynqServer.Shutdown()
 }
 
+// updateTaskStatus updates the status of a scheduled task in the master database queue
+func (w *WorkerServer) updateTaskStatus(ctx context.Context, taskIDStr string, status string, errMsg string) {
+	if taskIDStr == "" {
+		return
+	}
+	taskID, err := strconv.ParseInt(taskIDStr, 10, 64)
+	if err != nil {
+		slog.Error("failed to parse task ID for status update", "task_id", taskIDStr, "err", err)
+		return
+	}
+
+	_, err = w.dbPool.Exec(ctx, `
+		UPDATE master.task_queue 
+		SET status = $1, error_message = $2, updated_at = NOW() 
+		WHERE id = $3
+	`, status, errMsg, taskID)
+	if err != nil {
+		slog.Error("failed to update task status in task_queue", "task_id", taskID, "status", status, "err", err)
+	}
+}
+
 // HandleUnfreezeAccount updates account to clear freeze timestamp
 func (w *WorkerServer) HandleUnfreezeAccount(ctx context.Context, t *asynq.Task) error {
 	var payload BasePayload[UnfreezeAccountPayload]
@@ -72,9 +94,11 @@ func (w *WorkerServer) HandleUnfreezeAccount(ctx context.Context, t *asynq.Task)
 	query := fmt.Sprintf(`UPDATE "%s".account SET freeze_until = NULL, updated_at = NOW() WHERE id = $1`, payload.TenantID)
 	_, err := w.dbPool.Exec(ctx, query, payload.Data.AccountID)
 	if err != nil {
+		w.updateTaskStatus(ctx, payload.TaskID, "FAILED", err.Error())
 		return fmt.Errorf("failed to execute unfreeze account: %w", err)
 	}
 
+	w.updateTaskStatus(ctx, payload.TaskID, "COMPLETED", "")
 	return nil
 }
 
@@ -94,9 +118,11 @@ func (w *WorkerServer) HandleAccountSubsEndNotify(ctx context.Context, t *asynq.
 	`
 	_, err := w.dbPool.Exec(ctx, query, payload.Data.Message, payload.TenantID)
 	if err != nil {
+		w.updateTaskStatus(ctx, payload.TaskID, "FAILED", err.Error())
 		return fmt.Errorf("failed to write subs end reminder log to syslog: %w", err)
 	}
 
+	w.updateTaskStatus(ctx, payload.TaskID, "COMPLETED", "")
 	return nil
 }
 
@@ -113,9 +139,11 @@ func (w *WorkerServer) HandleSubsEndDisable(ctx context.Context, t *asynq.Task) 
 	query := fmt.Sprintf(`UPDATE "%s".account SET status = 'disable', updated_at = NOW() WHERE id = $1`, payload.TenantID)
 	_, err := w.dbPool.Exec(ctx, query, payload.Data.AccountID)
 	if err != nil {
+		w.updateTaskStatus(ctx, payload.TaskID, "FAILED", err.Error())
 		return fmt.Errorf("failed to execute disable account: %w", err)
 	}
 
+	w.updateTaskStatus(ctx, payload.TaskID, "COMPLETED", "")
 	return nil
 }
 

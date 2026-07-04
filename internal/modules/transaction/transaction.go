@@ -268,13 +268,30 @@ func (h *TransactionHandler) FindAllTransactions(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// Dynamic sorting construction
+	orderByClause := "created_at DESC"
+	orderBy := q.Get("order_by")
+	orderDir := q.Get("order_direction")
+	if orderBy != "" {
+		dir := "ASC"
+		if strings.ToUpper(orderDir) == "DESC" {
+			dir = "DESC"
+		}
+		switch orderBy {
+		case "created_at":
+			orderByClause = fmt.Sprintf("created_at %s", dir)
+		case "total_price":
+			orderByClause = fmt.Sprintf("total_price %s", dir)
+		}
+	}
+
 	selectQuery := fmt.Sprintf(`
 		SELECT id, customer, platform, total_price, created_at
 		FROM "%s".transaction_ts
 		%s
-		ORDER BY created_at DESC
+		ORDER BY %s
 		LIMIT $%d OFFSET $%d
-	`, tenantID, whereClause, argIdx, argIdx+1)
+	`, tenantID, whereClause, orderByClause, argIdx, argIdx+1)
 
 	selectArgs := append(args, limit, offset)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
@@ -1151,12 +1168,30 @@ func (h *TransactionHandler) FindAllEmailSubjects(w http.ResponseWriter, r *http
 		return
 	}
 
+	q := r.URL.Query()
+	orderBy := q.Get("order_by")
+	orderDir := q.Get("order_direction")
+
+	orderByClause := "created_at DESC"
+	if orderBy != "" {
+		dir := "ASC"
+		if strings.ToUpper(orderDir) == "DESC" {
+			dir = "DESC"
+		}
+		switch orderBy {
+		case "subject":
+			orderByClause = fmt.Sprintf("subject %s", dir)
+		case "created_at":
+			orderByClause = fmt.Sprintf("created_at %s", dir)
+		}
+	}
+
 	selectQuery := fmt.Sprintf(`
 		SELECT id, context, subject, extract_method, created_at, updated_at
 		FROM "%s".email_subject
-		ORDER BY created_at DESC
+		ORDER BY %s
 		LIMIT $1 OFFSET $2
-	`, tenantID)
+	`, tenantID, orderByClause)
 
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, limit, offset)
 	if err != nil {

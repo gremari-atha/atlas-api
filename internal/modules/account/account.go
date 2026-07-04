@@ -200,6 +200,10 @@ func (h *AccountHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 	statusFilter := q.Get("status")
 	variantFilter := q.Get("product_variant_id")
 	productFilter := q.Get("product_id")
+	billingFilter := q.Get("billing")
+	userFilter := q.Get("user")
+	orderBy := q.Get("order_by")
+	orderDir := q.Get("order_direction")
 
 	// Dynamic SQL construction
 	var queryConditions []string
@@ -215,7 +219,15 @@ func (h *AccountHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 
 	if statusFilter != "" {
 		if statusFilter == "freeze" {
-			queryConditions = append(queryConditions, "a.freeze_until IS NOT NULL")
+			queryConditions = append(queryConditions, "a.freeze_until IS NOT NULL AND a.freeze_until > NOW()")
+		} else if statusFilter == "active" {
+			queryConditions = append(queryConditions, fmt.Sprintf("a.status = $%d AND (a.freeze_until IS NULL OR a.freeze_until <= NOW())", argIdx))
+			args = append(args, "active")
+			argIdx++
+		} else if statusFilter == "ready" {
+			queryConditions = append(queryConditions, fmt.Sprintf("a.status = $%d AND (a.freeze_until IS NULL OR a.freeze_until <= NOW())", argIdx))
+			args = append(args, "ready")
+			argIdx++
 		} else {
 			queryConditions = append(queryConditions, fmt.Sprintf("a.status = $%d", argIdx))
 			args = append(args, statusFilter)
@@ -233,6 +245,21 @@ func (h *AccountHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 		pID, _ := strconv.ParseInt(productFilter, 10, 64)
 		queryConditions = append(queryConditions, fmt.Sprintf("pv.product_id = $%d", argIdx))
 		args = append(args, pID)
+		argIdx++
+	}
+
+	if billingFilter != "" {
+		queryConditions = append(queryConditions, fmt.Sprintf("a.billing ILIKE $%d", argIdx))
+		args = append(args, "%"+billingFilter+"%")
+		argIdx++
+	}
+
+	if userFilter != "" {
+		queryConditions = append(queryConditions, fmt.Sprintf(`EXISTS (
+			SELECT 1 FROM "%s".account_user au
+			WHERE au.account_id = a.id AND au.name ILIKE $%d AND au.status = 'active'
+		)`, tenantID, argIdx))
+		args = append(args, "%"+userFilter+"%")
 		argIdx++
 	}
 
@@ -258,6 +285,27 @@ func (h *AccountHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Dynamic sorting construction
+	orderByClause := "a.pinned DESC, a.updated_at DESC"
+	if orderBy != "" {
+		dir := "ASC"
+		if strings.ToUpper(orderDir) == "DESC" {
+			dir = "DESC"
+		}
+		switch orderBy {
+		case "email.email", "email":
+			orderByClause = fmt.Sprintf("a.pinned DESC, e.email %s", dir)
+		case "batch_end_date":
+			orderByClause = fmt.Sprintf("a.pinned DESC, a.batch_end_date %s", dir)
+		case "subscription_expiry":
+			orderByClause = fmt.Sprintf("a.pinned DESC, a.subscription_expiry %s", dir)
+		case "updated_at":
+			orderByClause = fmt.Sprintf("a.pinned DESC, a.updated_at %s", dir)
+		case "created_at":
+			orderByClause = fmt.Sprintf("a.pinned DESC, a.created_at %s", dir)
+		}
+	}
+
 	// Fetch accounts
 	selectQuery := fmt.Sprintf(`
 		SELECT a.id, a.account_password, a.subscription_expiry, a.status, a.billing, 
@@ -269,9 +317,9 @@ func (h *AccountHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 		JOIN "%s".product_variant pv ON a.product_variant_id = pv.id
 		JOIN "%s".product p ON pv.product_id = p.id
 		%s
-		ORDER BY a.pinned DESC, a.updated_at DESC
+		ORDER BY %s
 		LIMIT $%d OFFSET $%d
-	`, tenantID, tenantID, tenantID, tenantID, whereClause, argIdx, argIdx+1)
+	`, tenantID, tenantID, tenantID, tenantID, whereClause, orderByClause, argIdx, argIdx+1)
 
 	selectArgs := append(args, limit, offset)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
@@ -1052,7 +1100,7 @@ func (h *AccountHandler) Unfreeze(w http.ResponseWriter, r *http.Request) {
 
 	// 1. Clear freeze_until
 	_, err = tx.Exec(r.Context(), fmt.Sprintf(`
-		UPDATE "%s".account SET freeze_until = NULL, updated_at = NOW() WHERE id = $2
+		UPDATE "%s".account SET freeze_until = NULL, updated_at = NOW() WHERE id = $1
 	`, tenantID), id)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "failed to unfreeze account", err)

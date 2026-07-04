@@ -189,13 +189,25 @@ func (h *ProductHandler) FindAllProducts(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Dynamic sorting construction
+	orderByClause := "name ASC"
+	orderBy := r.URL.Query().Get("order_by")
+	orderDir := r.URL.Query().Get("order_direction")
+	if orderBy == "name" {
+		dir := "ASC"
+		if strings.ToUpper(orderDir) == "DESC" {
+			dir = "DESC"
+		}
+		orderByClause = fmt.Sprintf("name %s", dir)
+	}
+
 	selectQuery := fmt.Sprintf(`
 		SELECT id, name, created_at, updated_at 
 		FROM "%s".product 
 		%s 
-		ORDER BY name ASC 
+		ORDER BY %s 
 		LIMIT $%d OFFSET $%d
-	`, tenantID, whereClause, len(args)+1, len(args)+2)
+	`, tenantID, whereClause, orderByClause, len(args)+1, len(args)+2)
 
 	selectArgs := append(args, limit, offset)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
@@ -452,15 +464,27 @@ func (h *ProductHandler) FindAllVariants(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Dynamic sorting construction
+	orderByClause := "pv.name ASC"
+	orderBy := q.Get("order_by")
+	orderDir := q.Get("order_direction")
+	if orderBy == "name" {
+		dir := "ASC"
+		if strings.ToUpper(orderDir) == "DESC" {
+			dir = "DESC"
+		}
+		orderByClause = fmt.Sprintf("pv.name %s", dir)
+	}
+
 	selectQuery := fmt.Sprintf(`
 		SELECT pv.id, pv.name, pv.duration, pv.interval, pv.cooldown, pv.copy_template, pv.base_price, pv.product_id, pv.created_at, pv.updated_at,
 		       p.name AS product_name
 		FROM "%s".product_variant pv
 		LEFT JOIN "%s".product p ON pv.product_id = p.id
 		%s
-		ORDER BY pv.name ASC
+		ORDER BY %s
 		LIMIT $%d OFFSET $%d
-	`, tenantID, tenantID, whereClause, len(args)+1, len(args)+2)
+	`, tenantID, tenantID, whereClause, orderByClause, len(args)+1, len(args)+2)
 
 	selectArgs := append(args, limit, offset)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
@@ -710,6 +734,18 @@ func (h *ProductHandler) FindAllPlatformProducts(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// Dynamic sorting construction
+	orderByClause := "pp.name ASC"
+	orderBy := q.Get("order_by")
+	orderDir := q.Get("order_direction")
+	if orderBy == "name" {
+		dir := "ASC"
+		if strings.ToUpper(orderDir) == "DESC" {
+			dir = "DESC"
+		}
+		orderByClause = fmt.Sprintf("pp.name %s", dir)
+	}
+
 	selectQuery := fmt.Sprintf(`
 		SELECT pp.id, pp.platform, pp.name, pp.variant, pp.product_variant_id, pp.created_at, pp.updated_at,
 		       pv.id, pv.name, pv.duration, pv.interval, pv.cooldown, pv.copy_template, pv.base_price, pv.product_id, pv.created_at, pv.updated_at,
@@ -718,9 +754,9 @@ func (h *ProductHandler) FindAllPlatformProducts(w http.ResponseWriter, r *http.
 		LEFT JOIN "%s".product_variant pv ON pp.product_variant_id = pv.id
 		LEFT JOIN "%s".product p ON pv.product_id = p.id
 		%s
-		ORDER BY pp.name ASC
+		ORDER BY %s
 		LIMIT $%d OFFSET $%d
-	`, tenantID, tenantID, tenantID, whereClause, argIdx, argIdx+1)
+	`, tenantID, tenantID, tenantID, whereClause, orderByClause, argIdx, argIdx+1)
 
 	selectArgs := append(args, limit, offset)
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)

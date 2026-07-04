@@ -1083,12 +1083,12 @@ func (h *ProductHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 		if normVariant != nil {
 			err = h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
 				SELECT id, product_variant_id FROM "%s".platform_product
-				WHERE platform = $1 AND name = $2 AND variant = $3
+				WHERE platform = $1 AND LOWER(name) = LOWER($2) AND LOWER(variant) = LOWER($3)
 			`, tenantID), payload.Platform, item.Name, *normVariant).Scan(&pp.ID, &pp.ProductVariantID)
 		} else {
 			err = h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
 				SELECT id, product_variant_id FROM "%s".platform_product
-				WHERE platform = $1 AND name = $2 AND variant IS NULL
+				WHERE platform = $1 AND LOWER(name) = LOWER($2) AND variant IS NULL
 			`, tenantID), payload.Platform, item.Name).Scan(&pp.ID, &pp.ProductVariantID)
 		}
 

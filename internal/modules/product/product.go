@@ -1,6 +1,7 @@
 package product
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -14,6 +15,27 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+type NullableString struct {
+	Val   string
+	Valid bool
+	Set   bool
+}
+
+func (ns *NullableString) UnmarshalJSON(data []byte) error {
+	ns.Set = true
+	if string(data) == "null" {
+		ns.Valid = false
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	ns.Val = s
+	ns.Valid = true
+	return nil
+}
 
 // DB models
 type Product struct {
@@ -99,10 +121,10 @@ type CreatePlatformProductPayload struct {
 }
 
 type UpdatePlatformProductPayload struct {
-	Platform         *string  `json:"platform"`
-	Name             *string  `json:"name"`
-	Variant          **string `json:"variant"`
-	ProductVariantID *int64   `json:"product_variant_id,string"`
+	Platform         *string        `json:"platform"`
+	Name             *string        `json:"name"`
+	Variant          NullableString `json:"variant"`
+	ProductVariantID *int64         `json:"product_variant_id,string"`
 }
 
 type ResolveItem struct {
@@ -955,12 +977,12 @@ func (h *ProductHandler) UpdatePlatformProduct(w http.ResponseWriter, r *http.Re
 		argIdx++
 		currentPV = *payload.ProductVariantID
 	}
-	if payload.Variant != nil {
-		if *payload.Variant == nil {
+	if payload.Variant.Set {
+		if !payload.Variant.Valid {
 			query += "variant = NULL, "
 			currentVariant = nil
 		} else {
-			trimmed := strings.TrimSpace(**payload.Variant)
+			trimmed := strings.TrimSpace(payload.Variant.Val)
 			if trimmed == "" {
 				query += "variant = NULL, "
 				currentVariant = nil

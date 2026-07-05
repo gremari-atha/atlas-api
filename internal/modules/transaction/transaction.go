@@ -556,6 +556,7 @@ func (h *TransactionHandler) CreateTransaction(w http.ResponseWriter, r *http.Re
 	var generatedUsers []UserInfo
 	var failedItems []map[string]interface{}
 	var totalPrice int64 = 0
+	updatedAccounts := make(map[int64]bool)
 
 	for _, item := range payload.Items {
 		var finalProfileID int64
@@ -566,19 +567,20 @@ func (h *TransactionHandler) CreateTransaction(w http.ResponseWriter, r *http.Re
 		var count int
 		var pvID int64
 		var productID int64
+		var durationMs int64
 
 		if item.AccountProfileID != nil {
 			// Check specific profile
 			err = tx.QueryRow(r.Context(), fmt.Sprintf(`
-				SELECT ap.account_id, ap.max_user, COUNT(au.id), a.product_variant_id, pv.product_id, pv.base_price, p.name
+				SELECT ap.account_id, ap.max_user, COUNT(au.id), a.product_variant_id, pv.product_id, pv.base_price, p.name, pv.duration
 				FROM "%s".account_profile ap
 				JOIN "%s".account a ON ap.account_id = a.id
 				JOIN "%s".product_variant pv ON a.product_variant_id = pv.id
 				JOIN "%s".product p ON pv.product_id = p.id
 				LEFT JOIN "%s".account_user au ON ap.id = au.account_profile_id AND au.status = 'active'
 				WHERE ap.id = $1
-				GROUP BY ap.account_id, ap.max_user, a.product_variant_id, pv.product_id, pv.base_price, p.name
-			`, tenantID, tenantID, tenantID, tenantID, tenantID), *item.AccountProfileID).Scan(&finalAccountID, &finalProfileID, &count, &pvID, &productID, &finalPVBasePrice, &finalProductName)
+				GROUP BY ap.account_id, ap.max_user, a.product_variant_id, pv.product_id, pv.base_price, p.name, pv.duration
+			`, tenantID, tenantID, tenantID, tenantID, tenantID), *item.AccountProfileID).Scan(&finalAccountID, &finalProfileID, &count, &pvID, &productID, &finalPVBasePrice, &finalProductName, &durationMs)
 
 			if err != nil || count >= int(finalProfileID) {
 				failedItems = append(failedItems, map[string]interface{}{
@@ -600,6 +602,7 @@ func (h *TransactionHandler) CreateTransaction(w http.ResponseWriter, r *http.Re
 						ap.id AS profile_id,
 						ap.account_id,
 						pv.cooldown,
+						pv.duration,
 						ap.max_user,
 						pv.product_id,
 						pv.base_price,
@@ -621,7 +624,7 @@ func (h *TransactionHandler) CreateTransaction(w http.ResponseWriter, r *http.Re
 						AND a.status != 'disable'
 						AND a.freeze_until IS NULL
 					GROUP BY
-						ap.id, pv.cooldown, ap.max_user, ap.account_id, pv.product_id, pv.base_price, p.name
+						ap.id, pv.cooldown, pv.duration, ap.max_user, ap.account_id, pv.product_id, pv.base_price, p.name
 				)
 				SELECT
 					cs.profile_id AS "candidateProfileId",
@@ -629,6 +632,7 @@ func (h *TransactionHandler) CreateTransaction(w http.ResponseWriter, r *http.Re
 					cs.product_id AS "productId",
 					cs.base_price AS "basePrice",
 					cs.product_name AS "productName",
+					cs.duration AS "duration",
 					CASE
 						WHEN (
 							cs.last_user_created_at IS NULL OR
@@ -660,7 +664,7 @@ func (h *TransactionHandler) CreateTransaction(w http.ResponseWriter, r *http.Re
 
 			var candidateProfileId, accountId, productId, basePrice int64
 			var status, productName string
-			err = tx.QueryRow(r.Context(), sqlQuery, item.ProductVariantID).Scan(&candidateProfileId, &accountId, &productId, &basePrice, &productName, &status)
+			err = tx.QueryRow(r.Context(), sqlQuery, item.ProductVariantID).Scan(&candidateProfileId, &accountId, &productId, &basePrice, &productName, &durationMs, &status)
 			if err != nil {
 				failedItems = append(failedItems, map[string]interface{}{
 					"availability_status": "NOT_AVAILABLE",
@@ -686,17 +690,27 @@ func (h *TransactionHandler) CreateTransaction(w http.ResponseWriter, r *http.Re
 			finalProductName = productName
 		}
 
+		// Calculate expired_at if durationMs is valid
+		var expiredAt *time.Time
+		if durationMs > 0 {
+			t := time.Now().Add(time.Duration(durationMs) * time.Millisecond)
+			expiredAt = &t
+		}
+
 		// Insert active account user
 		var u UserInfo
 		err = tx.QueryRow(r.Context(), fmt.Sprintf(`
 			INSERT INTO "%s".account_user (name, status, expired_at, account_profile_id, account_id, created_at, updated_at)
-			VALUES ($1, 'active', NULL, $2, $3, NOW(), NOW())
+			VALUES ($1, 'active', $2, $3, $4, NOW(), NOW())
 			RETURNING id, name, status, expired_at, account_profile_id, account_id, created_at, updated_at
-		`, tenantID), payload.Customer, finalProfileID, finalAccountID).Scan(&u.ID, &u.Name, &u.Status, &u.ExpiredAt, &u.AccountProfileID, &u.AccountID, &u.CreatedAt, &u.UpdatedAt)
+		`, tenantID), payload.Customer, expiredAt, finalProfileID, finalAccountID).Scan(&u.ID, &u.Name, &u.Status, &u.ExpiredAt, &u.AccountProfileID, &u.AccountID, &u.CreatedAt, &u.UpdatedAt)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to insert account user", err)
 			return
 		}
+
+		// Track modified account ID for syncing later
+		updatedAccounts[finalAccountID] = true
 
 		itemPrice := finalPVBasePrice
 		if item.Price != nil {
@@ -724,6 +738,42 @@ func (h *TransactionHandler) CreateTransaction(w http.ResponseWriter, r *http.Re
 			"account_user": failedItems,
 		})
 		return
+	}
+
+	// Sync account status and batch dates for all modified accounts
+	for accID := range updatedAccounts {
+		_, err = tx.Exec(r.Context(), fmt.Sprintf(`
+			UPDATE "%s".account
+			SET status = CASE
+				WHEN EXISTS (
+					SELECT 1 FROM "%s".account_user
+					WHERE account_id = $1 AND status = 'active'
+				) THEN 'active'
+				ELSE 'ready'
+			END,
+			batch_end_date = (
+				SELECT MAX(expired_at) FROM "%s".account_user
+				WHERE account_id = $1 AND status = 'active'
+			),
+			batch_start_date = CASE
+				WHEN EXISTS (
+					SELECT 1 FROM "%s".account_user
+					WHERE account_id = $1 AND status = 'active'
+				) THEN COALESCE(
+					batch_start_date,
+					(
+						SELECT MIN(created_at) FROM "%s".account_user
+						WHERE account_id = $1 AND status = 'active'
+					),
+					NOW()
+				)
+				ELSE NULL
+			END
+			WHERE id = $2 AND status != 'disable'
+		`, tenantID, tenantID, tenantID, tenantID, tenantID), accID, accID)
+		if err != nil {
+			slog.Error("failed to sync account status and batch dates on transaction", "account_id", accID, "err", err)
+		}
 	}
 
 	// Create transaction

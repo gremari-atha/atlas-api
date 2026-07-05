@@ -99,10 +99,10 @@ type CreatePlatformProductPayload struct {
 }
 
 type UpdatePlatformProductPayload struct {
-	Platform         *string `json:"platform"`
-	Name             *string `json:"name"`
-	Variant          *string `json:"variant"`
-	ProductVariantID *int64  `json:"product_variant_id,string"`
+	Platform         *string  `json:"platform"`
+	Name             *string  `json:"name"`
+	Variant          **string `json:"variant"`
+	ProductVariantID *int64   `json:"product_variant_id,string"`
 }
 
 type ResolveItem struct {
@@ -956,15 +956,20 @@ func (h *ProductHandler) UpdatePlatformProduct(w http.ResponseWriter, r *http.Re
 		currentPV = *payload.ProductVariantID
 	}
 	if payload.Variant != nil {
-		trimmed := strings.TrimSpace(*payload.Variant)
-		if trimmed == "" {
+		if *payload.Variant == nil {
 			query += "variant = NULL, "
 			currentVariant = nil
 		} else {
-			query += fmt.Sprintf("variant = $%d, ", argIdx)
-			args = append(args, trimmed)
-			argIdx++
-			currentVariant = &trimmed
+			trimmed := strings.TrimSpace(**payload.Variant)
+			if trimmed == "" {
+				query += "variant = NULL, "
+				currentVariant = nil
+			} else {
+				query += fmt.Sprintf("variant = $%d, ", argIdx)
+				args = append(args, trimmed)
+				argIdx++
+				currentVariant = &trimmed
+			}
 		}
 	}
 

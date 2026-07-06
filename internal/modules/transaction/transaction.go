@@ -84,8 +84,12 @@ type ProductInfo struct {
 }
 
 type ProfileInfo struct {
-	ID   int64  `json:"id,string"`
-	Name string `json:"name"`
+	ID            int64   `json:"id,string"`
+	Name          string  `json:"name"`
+	MaxUser       int     `json:"max_user"`
+	AllowGenerate bool    `json:"allow_generate"`
+	Metadata      *string `json:"metadata"`
+	AccountID     int64   `json:"account_id,string"`
 }
 
 type Expense struct {
@@ -707,6 +711,84 @@ func (h *TransactionHandler) CreateTransaction(w http.ResponseWriter, r *http.Re
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to insert account user", err)
 			return
+		}
+
+		// Fetch nested profile and account details for UserInfo response
+		{
+			var ap ProfileInfo
+			var a AccountInfo
+			var e EmailInfo
+			var pv VariantInfo
+			var p ProductInfo
+
+			var apName, apMetadata sql.NullString
+			var aPass, aStatus, eMail, pvName, pvCopyTemplate, pName sql.NullString
+			var subExpiry sql.NullTime
+
+			fetchErr := tx.QueryRow(r.Context(), fmt.Sprintf(`
+				SELECT 
+					ap.name, ap.max_user, ap.allow_generate, ap.metadata, ap.account_id,
+					a.account_password, a.subscription_expiry, a.status, a.billing, a.email_id, a.product_variant_id,
+					e.email,
+					pv.name, pv.base_price, pv.product_id, pv.copy_template,
+					pr.name
+				FROM "%s".account_profile ap
+				JOIN "%s".account a ON ap.account_id = a.id
+				JOIN "%s".email e ON a.email_id = e.id
+				JOIN "%s".product_variant pv ON a.product_variant_id = pv.id
+				JOIN "%s".product pr ON pv.product_id = pr.id
+				WHERE ap.id = $1
+			`, tenantID, tenantID, tenantID, tenantID, tenantID), finalProfileID).Scan(
+				&apName, &ap.MaxUser, &ap.AllowGenerate, &apMetadata, &ap.AccountID,
+				&aPass, &subExpiry, &aStatus, &a.Billing, &a.EmailID, &a.ProductVariantID,
+				&eMail,
+				&pvName, &pv.BasePrice, &pv.ProductID, &pvCopyTemplate,
+				&pName,
+			)
+
+			if fetchErr == nil {
+				ap.ID = finalProfileID
+				if apName.Valid {
+					ap.Name = apName.String
+				}
+				if apMetadata.Valid {
+					s := apMetadata.String
+					ap.Metadata = &s
+				}
+				u.Profile = &ap
+
+				if aPass.Valid {
+					a.ID = finalAccountID
+					a.AccountPassword = aPass.String
+					if subExpiry.Valid {
+						a.SubscriptionExpiry = subExpiry.Time
+					}
+					a.Status = aStatus.String
+
+					if eMail.Valid {
+						e.ID = a.EmailID
+						e.Email = eMail.String
+						a.Email = &e
+					}
+
+					if pvName.Valid {
+						pv.ID = a.ProductVariantID
+						pv.Name = pvName.String
+						if pvCopyTemplate.Valid {
+							pv.CopyTemplate = &pvCopyTemplate.String
+						}
+						if pName.Valid {
+							p.ID = pv.ProductID
+							p.Name = pName.String
+							pv.Product = &p
+						}
+						a.ProductVariant = &pv
+					}
+					u.Account = &a
+				}
+			} else {
+				slog.Error("failed to fetch nested details for UserInfo in transaction", "profile_id", finalProfileID, "err", fetchErr)
+			}
 		}
 
 		// Track modified account ID for syncing later

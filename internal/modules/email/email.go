@@ -1,6 +1,8 @@
 package email
 
 import (
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -10,18 +12,25 @@ import (
 
 	"atlas-api/internal/middleware"
 	"atlas-api/internal/response"
+	"atlas-api/internal/scheduler"
 
+	"github.com/emersion/go-imap/client"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 // DB models
 type Email struct {
-	ID        int64     `json:"id,string"`
-	Email     string    `json:"email"`
-	Password  string    `json:"password,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID             int64     `json:"id,string"`
+	Email          string    `json:"email"`
+	Password       string    `json:"password,omitempty"`
+	EmailAccountID *string   `json:"email_account_id,omitempty"`
+	Provider       *string   `json:"provider,omitempty"`
+	Status         *string   `json:"status,omitempty"`
+	LastError      *string   `json:"last_error,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type EmailMessage struct {
@@ -33,6 +42,24 @@ type EmailMessage struct {
 	ParsedContext string    `json:"parsed_context"`
 	ParsedData    string    `json:"parsed_data"`
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+type GCPProject struct {
+	ID           int32     `json:"id"`
+	ProjectName  string    `json:"project_name"`
+	ClientID     string    `json:"client_id"`
+	ClientSecret string    `json:"client_secret,omitempty"`
+	Domain       string    `json:"domain"`
+	ActiveCount  int32     `json:"active_count"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type CreateGCPProjectPayload struct {
+	ProjectName  string `json:"project_name" validate:"required"`
+	ClientID     string `json:"client_id" validate:"required"`
+	ClientSecret string `json:"client_secret" validate:"required"`
+	Domain       string `json:"domain" validate:"required"`
 }
 
 // Payloads
@@ -47,11 +74,17 @@ type UpdateEmailPayload struct {
 }
 
 type EmailHandler struct {
-	dbPool *pgxpool.Pool
+	dbPool      *pgxpool.Pool
+	redisClient *redis.Client
+	asynqClient *scheduler.Client
 }
 
-func NewEmailHandler(dbPool *pgxpool.Pool) *EmailHandler {
-	return &EmailHandler{dbPool: dbPool}
+func NewEmailHandler(dbPool *pgxpool.Pool, redisClient *redis.Client, asynqClient *scheduler.Client) *EmailHandler {
+	return &EmailHandler{
+		dbPool:      dbPool,
+		redisClient: redisClient,
+		asynqClient: asynqClient,
+	}
 }
 
 // RegisterRoutes registers endpoints for email and email-message
@@ -63,11 +96,24 @@ func (h *EmailHandler) RegisterRoutes(r chi.Router, auth *middleware.AuthMiddlew
 		r.With(middleware.ValidateBody[CreateEmailPayload]()).Post("/", h.CreateEmail)
 		r.With(middleware.ValidateBody[UpdateEmailPayload]()).Patch("/{id}", h.UpdateEmail)
 		r.Delete("/{id}", h.RemoveEmail)
+		r.With(middleware.ValidateBody[ConnectIMAPPayload]()).Post("/connect-imap", h.ConnectIMAP)
+	})
+
+	r.Route("/email-connections", func(r chi.Router) {
+		r.Use(auth.TenantAuth)
+		r.Delete("/{email_account_id}", h.DisconnectEmailConnection)
 	})
 
 	r.Route("/email-message", func(r chi.Router) {
 		r.Use(auth.TenantAuth)
 		r.Get("/", h.FindAllEmailMessages)
+	})
+
+	r.Route("/admin/gcp-projects", func(r chi.Router) {
+		r.Use(auth.SuperadminAuth)
+		r.Get("/", h.FindAllGCPProjects)
+		r.With(middleware.ValidateBody[CreateGCPProjectPayload]()).Post("/", h.CreateGCPProject)
+		r.Delete("/{id}", h.RemoveGCPProject)
 	})
 }
 
@@ -80,17 +126,36 @@ func (h *EmailHandler) FindAllEmails(w http.ResponseWriter, r *http.Request) {
 	tenantID := uCtx.TenantID
 	page, limit, offset := response.ParsePagination(r)
 
+	// Ensure all tenant emails are registered in master.email_accounts
+	_, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`
+		INSERT INTO master.email_accounts (tenant_id, email, provider, credentials, status)
+		SELECT $1, e.email, '', '', 'DISCONNECTED'
+		FROM "%s".email e
+		WHERE NOT EXISTS (
+			SELECT 1 FROM master.email_accounts ma 
+			WHERE ma.tenant_id = $1 AND ma.email = e.email
+		)
+	`, tenantID), tenantID)
+	if err != nil {
+		slog.Error("failed to sync tenant emails to master.email_accounts", "tenant", tenantID, "err", err)
+	}
+
 	emailFilter := r.URL.Query().Get("email")
 	whereClause := ""
 	var args []interface{}
 	if emailFilter != "" {
-		whereClause = "WHERE email ILIKE $1"
+		whereClause = "WHERE e.email ILIKE $2" // $2 because $1 is tenantID
 		args = append(args, "%"+emailFilter+"%")
 	}
 
-	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".email %s`, tenantID, whereClause)
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".email e %s`, tenantID, whereClause)
 	var total int64
-	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
+	var countArgs []interface{}
+	if emailFilter != "" {
+		countQuery = strings.ReplaceAll(countQuery, "$2", "$1")
+		countArgs = append(countArgs, "%"+emailFilter+"%")
+	}
+	err = h.dbPool.QueryRow(r.Context(), countQuery, countArgs...).Scan(&total)
 	if err != nil {
 		slog.Error("failed to count emails", "tenant", tenantID, "err", err)
 		response.Error(w, http.StatusInternalServerError, "database count failed", err)
@@ -98,7 +163,7 @@ func (h *EmailHandler) FindAllEmails(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Dynamic sorting construction
-	orderByClause := "email ASC"
+	orderByClause := "e.email ASC"
 	orderBy := r.URL.Query().Get("order_by")
 	orderDir := r.URL.Query().Get("order_direction")
 	if orderBy == "email" {
@@ -106,18 +171,22 @@ func (h *EmailHandler) FindAllEmails(w http.ResponseWriter, r *http.Request) {
 		if strings.ToUpper(orderDir) == "DESC" {
 			dir = "DESC"
 		}
-		orderByClause = fmt.Sprintf("email %s", dir)
+		orderByClause = fmt.Sprintf("e.email %s", dir)
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, email, password, created_at, updated_at 
-		FROM "%s".email 
+		SELECT e.id, e.email, e.password, e.created_at, e.updated_at,
+		       ma.id as email_account_id, ma.provider, ma.status, ma.last_error
+		FROM "%s".email e
+		LEFT JOIN master.email_accounts ma ON ma.tenant_id = $1 AND ma.email = e.email
 		%s 
 		ORDER BY %s 
 		LIMIT $%d OFFSET $%d
-	`, tenantID, whereClause, orderByClause, len(args)+1, len(args)+2)
+	`, tenantID, whereClause, orderByClause, len(args)+2, len(args)+3)
 
-	selectArgs := append(args, limit, offset)
+	selectArgs := append([]interface{}{tenantID}, args...)
+	selectArgs = append(selectArgs, limit, offset)
+
 	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
 		slog.Error("failed to query emails", "tenant", tenantID, "err", err)
@@ -129,7 +198,7 @@ func (h *EmailHandler) FindAllEmails(w http.ResponseWriter, r *http.Request) {
 	var emails []Email
 	for rows.Next() {
 		var em Email
-		if err := rows.Scan(&em.ID, &em.Email, &em.Password, &em.CreatedAt, &em.UpdatedAt); err == nil {
+		if err := rows.Scan(&em.ID, &em.Email, &em.Password, &em.CreatedAt, &em.UpdatedAt, &em.EmailAccountID, &em.Provider, &em.Status, &em.LastError); err == nil {
 			emails = append(emails, em)
 		}
 	}
@@ -142,11 +211,28 @@ func (h *EmailHandler) FindOneEmail(w http.ResponseWriter, r *http.Request) {
 	tenantID := uCtx.TenantID
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 
+	// Ensure all tenant emails are registered in master.email_accounts
+	_, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`
+		INSERT INTO master.email_accounts (tenant_id, email, provider, credentials, status)
+		SELECT $1, e.email, '', '', 'DISCONNECTED'
+		FROM "%s".email e
+		WHERE NOT EXISTS (
+			SELECT 1 FROM master.email_accounts ma 
+			WHERE ma.tenant_id = $1 AND ma.email = e.email
+		)
+	`, tenantID), tenantID)
+	if err != nil {
+		slog.Error("failed to sync tenant emails to master.email_accounts", "tenant", tenantID, "err", err)
+	}
+
 	var em Email
-	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT id, email, password, created_at, updated_at 
-		FROM "%s".email WHERE id = $1
-	`, tenantID), id).Scan(&em.ID, &em.Email, &em.Password, &em.CreatedAt, &em.UpdatedAt)
+	err = h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT e.id, e.email, e.password, e.created_at, e.updated_at,
+		       ma.id as email_account_id, ma.provider, ma.status, ma.last_error
+		FROM "%s".email e
+		LEFT JOIN master.email_accounts ma ON ma.tenant_id = $1 AND ma.email = e.email
+		WHERE e.id = $2
+	`, tenantID), tenantID, id).Scan(&em.ID, &em.Email, &em.Password, &em.CreatedAt, &em.UpdatedAt, &em.EmailAccountID, &em.Provider, &em.Status, &em.LastError)
 
 	if err != nil {
 		response.Error(w, http.StatusNotFound, fmt.Sprintf("email dengan id: %d tidak ditemukan", id), err)
@@ -323,3 +409,196 @@ func (h *EmailHandler) FindAllEmailMessages(w http.ResponseWriter, r *http.Reque
 
 	response.JSON(w, http.StatusOK, response.NewPaginationResponse(messages, total, page, limit))
 }
+
+// ==========================================
+// ADMIN GCP PROJECTS POOL CRUD
+// ==========================================
+
+func (h *EmailHandler) FindAllGCPProjects(w http.ResponseWriter, r *http.Request) {
+	rows, err := h.dbPool.Query(r.Context(), "SELECT id, project_name, client_id, client_secret, domain, active_count, created_at, updated_at FROM master.gcp_projects ORDER BY id ASC")
+	if err != nil {
+		slog.Error("failed to query gcp projects", "err", err)
+		response.Error(w, http.StatusInternalServerError, "database query failed", err)
+		return
+	}
+	defer rows.Close()
+
+	var projects []GCPProject
+	for rows.Next() {
+		var p GCPProject
+		if err := rows.Scan(&p.ID, &p.ProjectName, &p.ClientID, &p.ClientSecret, &p.Domain, &p.ActiveCount, &p.CreatedAt, &p.UpdatedAt); err == nil {
+			p.ClientSecret = "" // redact secret
+			projects = append(projects, p)
+		}
+	}
+
+	response.JSON(w, http.StatusOK, projects)
+}
+
+func (h *EmailHandler) CreateGCPProject(w http.ResponseWriter, r *http.Request) {
+	payload := middleware.GetBody[CreateGCPProjectPayload](r)
+
+	var p GCPProject
+	err := h.dbPool.QueryRow(r.Context(), `
+		INSERT INTO master.gcp_projects (project_name, client_id, client_secret, domain, active_count, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 0, NOW(), NOW())
+		RETURNING id, project_name, client_id, client_secret, domain, active_count, created_at, updated_at
+	`, payload.ProjectName, payload.ClientID, payload.ClientSecret, payload.Domain).Scan(&p.ID, &p.ProjectName, &p.ClientID, &p.ClientSecret, &p.Domain, &p.ActiveCount, &p.CreatedAt, &p.UpdatedAt)
+
+	if err != nil {
+		slog.Error("failed to create gcp project", "err", err)
+		response.Error(w, http.StatusInternalServerError, "failed to insert gcp project", err)
+		return
+	}
+
+	p.ClientSecret = "" // redact secret
+	response.JSON(w, http.StatusCreated, p)
+}
+
+func (h *EmailHandler) RemoveGCPProject(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "GCP project ID must be integer")
+		return
+	}
+
+	// Verify active count is zero before deletion
+	var activeCount int
+	err = h.dbPool.QueryRow(r.Context(), "SELECT active_count FROM master.gcp_projects WHERE id = $1", id).Scan(&activeCount)
+	if err != nil {
+		response.Error(w, http.StatusNotFound, "GCP project not found", err)
+		return
+	}
+
+	if activeCount > 0 {
+		response.Error(w, http.StatusBadRequest, "Cannot delete a GCP project with active email connections")
+		return
+	}
+
+	_, err = h.dbPool.Exec(r.Context(), "DELETE FROM master.gcp_projects WHERE id = $1", id)
+	if err != nil {
+		slog.Error("failed to delete gcp project", "id", id, "err", err)
+		response.Error(w, http.StatusInternalServerError, "failed to delete gcp project", err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type ConnectIMAPPayload struct {
+	EmailAccountID string `json:"email_account_id" validate:"required,uuid"`
+	Host           string `json:"host" validate:"required"`
+	Port           int    `json:"port" validate:"required"`
+	Username       string `json:"username" validate:"required"`
+	Password       string `json:"password" validate:"required"`
+	Security       string `json:"security" validate:"required,oneof=ssl starttls none"`
+}
+
+func (h *EmailHandler) ConnectIMAP(w http.ResponseWriter, r *http.Request) {
+	payload := middleware.GetBody[ConnectIMAPPayload](r)
+
+	// 1. Verify target email account exists in master.email_accounts
+	var exists bool
+	err := h.dbPool.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM master.email_accounts WHERE id = $1)", payload.EmailAccountID).Scan(&exists)
+	if err != nil || !exists {
+		response.Error(w, http.StatusNotFound, "Email account record not found in master database", err)
+		return
+	}
+
+	// 2. Perform test connection and capabilities check
+	addr := fmt.Sprintf("%s:%d", payload.Host, payload.Port)
+	var c *client.Client
+
+	if payload.Security == "ssl" {
+		// Implicit TLS
+		c, err = client.DialTLS(addr, &tls.Config{InsecureSkipVerify: true})
+	} else {
+		// Plain or explicit STARTTLS
+		c, err = client.Dial(addr)
+		if err == nil && payload.Security == "starttls" {
+			err = c.StartTLS(&tls.Config{InsecureSkipVerify: true})
+		}
+	}
+
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Gagal terhubung ke server IMAP: "+err.Error(), err)
+		return
+	}
+	defer c.Logout()
+
+	// 3. Authenticate
+	err = c.Login(payload.Username, payload.Password)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Gagal login ke server IMAP (Username/Password salah): "+err.Error(), err)
+		return
+	}
+
+	// 4. Verify IDLE support
+	supported, err := c.Support("IDLE")
+	if err != nil || !supported {
+		response.Error(w, http.StatusBadRequest, "Server IMAP ini tidak mendukung IDLE capability", err)
+		return
+	}
+
+	// 5. Save credentials to master.email_accounts
+	creds := map[string]interface{}{
+		"host":     payload.Host,
+		"port":     payload.Port,
+		"username": payload.Username,
+		"password": payload.Password,
+		"security": payload.Security,
+	}
+	credsBytes, _ := json.Marshal(creds)
+
+	_, err = h.dbPool.Exec(r.Context(), `
+		UPDATE master.email_accounts
+		SET credentials = $1, provider = 'imap', status = 'ACTIVE', last_error = NULL, updated_at = NOW()
+		WHERE id = $2
+	`, string(credsBytes), payload.EmailAccountID)
+
+	if err != nil {
+		slog.Error("failed to update imap credentials", "id", payload.EmailAccountID, "err", err)
+		response.Error(w, http.StatusInternalServerError, "Gagal menyimpan kredensial ke database", err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, map[string]string{"status": "SUCCESS", "message": "IMAP account connected successfully"})
+}
+
+func (h *EmailHandler) DisconnectEmailConnection(w http.ResponseWriter, r *http.Request) {
+	uCtx, _ := middleware.GetUserContext(r.Context())
+	tenantID := uCtx.TenantID
+	emailAccountID := chi.URLParam(r, "email_account_id")
+
+	// 1. Verify connection exists and belongs to tenant
+	var provider string
+	err := h.dbPool.QueryRow(r.Context(), `
+		SELECT provider FROM master.email_accounts 
+		WHERE id = $1 AND tenant_id = $2
+	`, emailAccountID, tenantID).Scan(&provider)
+	if err != nil {
+		response.Error(w, http.StatusNotFound, "Koneksi email tidak ditemukan", err)
+		return
+	}
+
+	// 2. Publish disconnect event to Redis pubsub for active connection terminations (e.g. IMAP)
+	err = h.redisClient.Publish(r.Context(), "email_connections:disconnect", emailAccountID).Err()
+	if err != nil {
+		slog.Error("failed to publish disconnect event to Redis", "id", emailAccountID, "err", err)
+	}
+
+	// 3. Enqueue the cleanups task to Asynq
+	payload := scheduler.EmailDisconnectPayload{
+		EmailAccountID: emailAccountID,
+	}
+	err = scheduler.EnqueueTask(h.asynqClient, r.Context(), scheduler.TypeEmailDisconnect, tenantID, "", payload, time.Time{})
+	if err != nil {
+		slog.Error("failed to enqueue disconnect task in Asynq", "id", emailAccountID, "err", err)
+		response.Error(w, http.StatusInternalServerError, "Gagal memproses pemutusan koneksi", err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+

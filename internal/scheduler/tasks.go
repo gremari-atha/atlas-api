@@ -15,6 +15,7 @@ const (
 	TypeAccountSubsEndNotify = "accountSubsEndNotify"
 	TypeSubsEndDisable       = "subsEndDisableAccount"
 	TypeNetflixResetPassword = "netflixResetPassword"
+	TypeEmailDisconnect      = "email:disconnect"
 )
 
 // BasePayload wraps task data with tenant and task ID context
@@ -43,6 +44,11 @@ type SubsEndDisableAccountPayload struct {
 type NetflixResetPasswordPayload struct {
 	AccountID int64  `json:"accountId,string"`
 	Email     string `json:"email"`
+}
+
+// EmailDisconnectPayload data details
+type EmailDisconnectPayload struct {
+	EmailAccountID string `json:"email_account_id"`
 }
 
 // Client manages task enqueuing using Asynq

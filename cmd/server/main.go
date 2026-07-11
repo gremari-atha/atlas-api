@@ -13,6 +13,7 @@ import (
 	"atlas-api/internal/config"
 	"atlas-api/internal/database"
 	"atlas-api/internal/middleware"
+	"atlas-api/internal/redisrelay"
 	"atlas-api/internal/response"
 	"atlas-api/internal/scheduler"
 	"atlas-api/internal/websocket"
@@ -81,6 +82,11 @@ func main() {
 	wsHub := websocket.NewHub(dbPool)
 	go wsHub.Run(ctx)
 	slog.Info("WebSocket Hub initialized and running")
+
+	// Start Redis Event Relay
+	relay := redisrelay.NewEventRelay(redisClient, wsHub)
+	relay.Start(ctx)
+	slog.Info("Redis Event Relay initialized and running")
 
 	// Initialize Asynq background worker server & client
 	redisURL := os.Getenv("REDIS_URL")
@@ -162,7 +168,7 @@ func main() {
 	emailForwardHandler := emailforward.NewEmailForwardHandler(dbPool)
 	emailForwardHandler.RegisterRoutes(r)
 
-	emailHandler := email.NewEmailHandler(dbPool)
+	emailHandler := email.NewEmailHandler(dbPool, redisClient, asynqClient)
 	emailHandler.RegisterRoutes(r, auth)
 
 	botHandler := bot.NewBotHandler(dbPool, wsHub)

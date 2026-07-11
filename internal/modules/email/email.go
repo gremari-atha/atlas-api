@@ -527,7 +527,7 @@ func (h *EmailHandler) ConnectIMAP(w http.ResponseWriter, r *http.Request) {
 
 	_, err = h.dbPool.Exec(r.Context(), `
 		UPDATE master.email_accounts
-		SET credentials = $1, provider = 'imap', status = 'ACTIVE', last_error = NULL, updated_at = NOW()
+		SET credentials = $1, provider = 'imap', status = 'ACTIVE', last_sync_at = NOW(), last_error = NULL, updated_at = NOW()
 		WHERE id = $2
 	`, string(credsBytes), payload.EmailAccountID)
 

@@ -102,7 +102,7 @@ func (h *EmailHandler) RegisterRoutes(r chi.Router, auth *middleware.AuthMiddlew
 
 	r.Route("/email-connections", func(r chi.Router) {
 		r.Use(auth.TenantAuth)
-		r.Post("/initialize", h.InitializeConnection)
+		r.With(middleware.ValidateBody[InitializeConnectionPayload]()).Post("/initialize", h.InitializeConnection)
 		r.Delete("/{email_account_id}", h.DisconnectEmailConnection)
 	})
 

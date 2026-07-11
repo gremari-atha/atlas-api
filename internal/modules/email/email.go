@@ -16,6 +16,7 @@ import (
 
 	"github.com/emersion/go-imap/client"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
@@ -101,6 +102,7 @@ func (h *EmailHandler) RegisterRoutes(r chi.Router, auth *middleware.AuthMiddlew
 
 	r.Route("/email-connections", func(r chi.Router) {
 		r.Use(auth.TenantAuth)
+		r.Post("/initialize", h.InitializeConnection)
 		r.Delete("/{email_account_id}", h.DisconnectEmailConnection)
 	})
 
@@ -126,20 +128,6 @@ func (h *EmailHandler) FindAllEmails(w http.ResponseWriter, r *http.Request) {
 	tenantID := uCtx.TenantID
 	page, limit, offset := response.ParsePagination(r)
 
-	// Ensure all tenant emails are registered in master.email_accounts
-	_, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`
-		INSERT INTO master.email_accounts (tenant_id, email, provider, credentials, status)
-		SELECT $1, e.email, '', '', 'DISCONNECTED'
-		FROM "%s".email e
-		WHERE NOT EXISTS (
-			SELECT 1 FROM master.email_accounts ma 
-			WHERE ma.tenant_id = $1 AND ma.email = e.email
-		)
-	`, tenantID), tenantID)
-	if err != nil {
-		slog.Error("failed to sync tenant emails to master.email_accounts", "tenant", tenantID, "err", err)
-	}
-
 	emailFilter := r.URL.Query().Get("email")
 	whereClause := ""
 	var args []interface{}
@@ -155,7 +143,7 @@ func (h *EmailHandler) FindAllEmails(w http.ResponseWriter, r *http.Request) {
 		countQuery = strings.ReplaceAll(countQuery, "$2", "$1")
 		countArgs = append(countArgs, "%"+emailFilter+"%")
 	}
-	err = h.dbPool.QueryRow(r.Context(), countQuery, countArgs...).Scan(&total)
+	err := h.dbPool.QueryRow(r.Context(), countQuery, countArgs...).Scan(&total)
 	if err != nil {
 		slog.Error("failed to count emails", "tenant", tenantID, "err", err)
 		response.Error(w, http.StatusInternalServerError, "database count failed", err)
@@ -211,22 +199,8 @@ func (h *EmailHandler) FindOneEmail(w http.ResponseWriter, r *http.Request) {
 	tenantID := uCtx.TenantID
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 
-	// Ensure all tenant emails are registered in master.email_accounts
-	_, err := h.dbPool.Exec(r.Context(), fmt.Sprintf(`
-		INSERT INTO master.email_accounts (tenant_id, email, provider, credentials, status)
-		SELECT $1, e.email, '', '', 'DISCONNECTED'
-		FROM "%s".email e
-		WHERE NOT EXISTS (
-			SELECT 1 FROM master.email_accounts ma 
-			WHERE ma.tenant_id = $1 AND ma.email = e.email
-		)
-	`, tenantID), tenantID)
-	if err != nil {
-		slog.Error("failed to sync tenant emails to master.email_accounts", "tenant", tenantID, "err", err)
-	}
-
 	var em Email
-	err = h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
+	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
 		SELECT e.id, e.email, e.password, e.created_at, e.updated_at,
 		       ma.id as email_account_id, ma.provider, ma.status, ma.last_error
 		FROM "%s".email e
@@ -600,5 +574,41 @@ func (h *EmailHandler) DisconnectEmailConnection(w http.ResponseWriter, r *http.
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type InitializeConnectionPayload struct {
+	EmailID int64 `json:"email_id,string" validate:"required"`
+}
+
+func (h *EmailHandler) InitializeConnection(w http.ResponseWriter, r *http.Request) {
+	uCtx, _ := middleware.GetUserContext(r.Context())
+	tenantID := uCtx.TenantID
+	payload := middleware.GetBody[InitializeConnectionPayload](r)
+
+	var emailAddress string
+	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT email FROM "%s".email WHERE id = $1
+	`, tenantID), payload.EmailID).Scan(&emailAddress)
+	if err != nil {
+		response.Error(w, http.StatusNotFound, "Email tidak ditemukan", err)
+		return
+	}
+
+	// Generate UUID in Go to bypass database gen_random_uuid() requirements
+	emailAccountID := uuid.New().String()
+	_, err = h.dbPool.Exec(r.Context(), `
+		INSERT INTO master.email_accounts (id, tenant_id, email, provider, credentials, status)
+		VALUES ($1, $2, $3, '', '', 'DISCONNECTED')
+		ON CONFLICT (tenant_id, email) DO UPDATE SET updated_at = NOW()
+	`, emailAccountID, tenantID, emailAddress)
+	if err != nil {
+		slog.Error("failed to initialize connection", "tenant", tenantID, "email", emailAddress, "err", err)
+		response.Error(w, http.StatusInternalServerError, "Gagal menginisialisasi koneksi", err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, map[string]string{
+		"email_account_id": emailAccountID,
+	})
 }
 

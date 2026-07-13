@@ -98,6 +98,7 @@ func (h *EmailHandler) RegisterRoutes(r chi.Router, auth *middleware.AuthMiddlew
 		r.With(middleware.ValidateBody[UpdateEmailPayload]()).Patch("/{id}", h.UpdateEmail)
 		r.Delete("/{id}", h.RemoveEmail)
 		r.With(middleware.ValidateBody[ConnectIMAPPayload]()).Post("/connect-imap", h.ConnectIMAP)
+		r.With(middleware.ValidateBody[ConnectResendPayload]()).Post("/connect-resend", h.ConnectResend)
 	})
 
 	r.Route("/email-connections", func(r chi.Router) {
@@ -538,6 +539,67 @@ func (h *EmailHandler) ConnectIMAP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.JSON(w, http.StatusOK, map[string]string{"status": "SUCCESS", "message": "IMAP account connected successfully"})
+}
+
+type ConnectResendPayload struct {
+	EmailAccountID string `json:"email_account_id" validate:"required,uuid"`
+	APIKey         string `json:"api_key" validate:"required"`
+	WebhookSecret  string `json:"webhook_secret" validate:"required"`
+}
+
+func (h *EmailHandler) ConnectResend(w http.ResponseWriter, r *http.Request) {
+	payload := middleware.GetBody[ConnectResendPayload](r)
+
+	// 1. Verify target email account exists in master.email_accounts
+	var exists bool
+	err := h.dbPool.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM master.email_accounts WHERE id = $1)", payload.EmailAccountID).Scan(&exists)
+	if err != nil || !exists {
+		response.Error(w, http.StatusNotFound, "Email account record not found in master database", err)
+		return
+	}
+
+	// 2. Validate Resend API Key
+	req, err := http.NewRequestWithContext(r.Context(), "GET", "https://api.resend.com/emails/receiving", nil)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "Gagal membuat request verifikasi API Key", err)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+payload.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Gagal memverifikasi API Key Resend (Koneksi error): "+err.Error(), err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		response.Error(w, http.StatusBadRequest, fmt.Sprintf("Gagal memverifikasi API Key Resend: status %d (API Key tidak valid atau tidak memiliki izin)", resp.StatusCode), nil)
+		return
+	}
+
+	// 3. Save credentials to master.email_accounts
+	creds := map[string]interface{}{
+		"api_key":        payload.APIKey,
+		"webhook_secret": payload.WebhookSecret,
+	}
+	credsBytes, _ := json.Marshal(creds)
+
+	_, err = h.dbPool.Exec(r.Context(), `
+		UPDATE master.email_accounts
+		SET credentials = $1, provider = 'resend', status = 'ACTIVE', last_sync_at = NOW(), last_error = NULL, updated_at = NOW()
+		WHERE id = $2
+	`, string(credsBytes), payload.EmailAccountID)
+
+	if err != nil {
+		slog.Error("failed to update resend credentials", "id", payload.EmailAccountID, "err", err)
+		response.Error(w, http.StatusInternalServerError, "Gagal menyimpan kredensial ke database", err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, map[string]string{"status": "SUCCESS", "message": "Resend account connected successfully"})
 }
 
 func (h *EmailHandler) DisconnectEmailConnection(w http.ResponseWriter, r *http.Request) {

@@ -1,0 +1,1 @@
+ALTER TABLE email ALTER COLUMN password SET NOT NULL;

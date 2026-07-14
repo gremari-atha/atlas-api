@@ -63,11 +63,18 @@ type PeakHourStats struct {
 	TransactionCount int64 `json:"transaction_count"`
 }
 
+type TodayStats struct {
+	NetIncome        int64 `json:"net_income"`
+	Expense          int64 `json:"expense"`
+	TransactionCount int64 `json:"transaction_count"`
+}
+
 type AllStatsResponse struct {
 	Revenue  RevenueStats    `json:"revenue"`
 	Product  []ProductStats  `json:"product"`
 	Platform []PlatformStats `json:"platform"`
 	PeakHour []PeakHourStats `json:"peakHour"`
+	Today    TodayStats      `json:"today"`
 }
 
 type StatisticHandler struct {
@@ -390,6 +397,39 @@ func (h *StatisticHandler) GetAllStatistic(w http.ResponseWriter, r *http.Reques
 		peakStats = append(peakStats, ph)
 	}
 	responsePayload.PeakHour = peakStats
+
+	// 6. Query Today Stats
+	todaySql := fmt.Sprintf(`
+		WITH rev AS (
+			SELECT 
+				COALESCE(SUM(ti.price), 0)::BIGINT AS total_revenue, 
+				COUNT(DISTINCT t.id)::BIGINT AS total_transaction
+			FROM "%s".transaction_ts t
+			LEFT JOIN "%s".transaction_item_ts ti ON t.id = ti.transaction_id
+			WHERE (t.created_at AT TIME ZONE 'Asia/Jakarta')::date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+		),
+		exp AS (
+			SELECT COALESCE(SUM(amount), 0)::BIGINT AS total_expense
+			FROM "%s".expense
+			WHERE (created_at AT TIME ZONE 'Asia/Jakarta')::date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+		)
+		SELECT 
+			(total_revenue - total_expense)::BIGINT AS net_income,
+			total_expense::BIGINT AS expense,
+			total_transaction::BIGINT AS transaction_count
+		FROM rev, exp;
+	`, tenantID, tenantID, tenantID)
+
+	err = h.dbPool.QueryRow(r.Context(), todaySql).Scan(
+		&responsePayload.Today.NetIncome,
+		&responsePayload.Today.Expense,
+		&responsePayload.Today.TransactionCount,
+	)
+	if err != nil {
+		slog.Error("failed to query today stats", "err", err)
+		response.Error(w, http.StatusInternalServerError, "database today stats query failed", err)
+		return
+	}
 
 	response.JSON(w, http.StatusOK, responsePayload)
 }

@@ -25,7 +25,7 @@ import (
 type Email struct {
 	ID             int64     `json:"id,string"`
 	Email          string    `json:"email"`
-	Password       string    `json:"password,omitempty"`
+	Password       *string   `json:"password,omitempty"`
 	EmailAccountID *string   `json:"email_account_id,omitempty"`
 	Provider       *string   `json:"provider,omitempty"`
 	Status         *string   `json:"status,omitempty"`
@@ -65,8 +65,8 @@ type CreateGCPProjectPayload struct {
 
 // Payloads
 type CreateEmailPayload struct {
-	Email    string `json:"email" validate:"required,email"`
-	Password string `json:"password" validate:"required"`
+	Email    string  `json:"email" validate:"required,email"`
+	Password *string `json:"password" validate:"omitempty"`
 }
 
 type UpdateEmailPayload struct {

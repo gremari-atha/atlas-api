@@ -103,7 +103,6 @@ type Expense struct {
 
 type EmailSubject struct {
 	ID            int64     `json:"id,string"`
-	Context       string    `json:"context"`
 	Subject       string    `json:"subject"`
 	ExtractMethod string    `json:"extract_method"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -144,13 +143,11 @@ type UpdateExpensePayload struct {
 }
 
 type CreateEmailSubjectPayload struct {
-	Context       string `json:"context" validate:"required"`
 	Subject       string `json:"subject" validate:"required"`
 	ExtractMethod string `json:"extract_method" validate:"required"`
 }
 
 type UpdateEmailSubjectPayload struct {
-	Context       *string `json:"context"`
 	Subject       *string `json:"subject"`
 	ExtractMethod *string `json:"extract_method"`
 }
@@ -1319,7 +1316,7 @@ func (h *TransactionHandler) FindAllEmailSubjects(w http.ResponseWriter, r *http
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, context, subject, extract_method, created_at, updated_at
+		SELECT id, subject, extract_method, created_at, updated_at
 		FROM "%s".email_subject
 		ORDER BY %s
 		LIMIT $1 OFFSET $2
@@ -1334,7 +1331,7 @@ func (h *TransactionHandler) FindAllEmailSubjects(w http.ResponseWriter, r *http
 
 	for rows.Next() {
 		var s EmailSubject
-		err = rows.Scan(&s.ID, &s.Context, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
+		err = rows.Scan(&s.ID, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "database scan failed", err)
 			return
@@ -1352,9 +1349,9 @@ func (h *TransactionHandler) FindOneEmailSubject(w http.ResponseWriter, r *http.
 
 	var s EmailSubject
 	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT id, context, subject, extract_method, created_at, updated_at
+		SELECT id, subject, extract_method, created_at, updated_at
 		FROM "%s".email_subject WHERE id = $1
-	`, tenantID), id).Scan(&s.ID, &s.Context, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
+	`, tenantID), id).Scan(&s.ID, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
 
 	if err != nil {
 		response.Error(w, http.StatusNotFound, fmt.Sprintf("emailSubject dengan id: %d tidak ditemukan", id), err)
@@ -1371,10 +1368,10 @@ func (h *TransactionHandler) CreateEmailSubject(w http.ResponseWriter, r *http.R
 
 	var s EmailSubject
 	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		INSERT INTO "%s".email_subject (context, subject, extract_method, created_at, updated_at)
-		VALUES ($1, $2, $3, NOW(), NOW())
-		RETURNING id, context, subject, extract_method, created_at, updated_at
-	`, tenantID), payload.Context, payload.Subject, payload.ExtractMethod).Scan(&s.ID, &s.Context, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
+		INSERT INTO "%s".email_subject (subject, extract_method, created_at, updated_at)
+		VALUES ($1, $2, NOW(), NOW())
+		RETURNING id, subject, extract_method, created_at, updated_at
+	`, tenantID), payload.Subject, payload.ExtractMethod).Scan(&s.ID, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
 
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "failed to insert email subject", err)
@@ -1402,11 +1399,6 @@ func (h *TransactionHandler) UpdateEmailSubject(w http.ResponseWriter, r *http.R
 	var args []interface{}
 	argIdx := 1
 
-	if payload.Context != nil {
-		query += fmt.Sprintf("context = $%d, ", argIdx)
-		args = append(args, *payload.Context)
-		argIdx++
-	}
 	if payload.Subject != nil {
 		query += fmt.Sprintf("subject = $%d, ", argIdx)
 		args = append(args, *payload.Subject)
@@ -1441,9 +1433,9 @@ func (h *TransactionHandler) UpdateEmailSubject(w http.ResponseWriter, r *http.R
 
 	var s EmailSubject
 	_ = h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT id, context, subject, extract_method, created_at, updated_at
+		SELECT id, subject, extract_method, created_at, updated_at
 		FROM "%s".email_subject WHERE id = $1
-	`, tenantID), id).Scan(&s.ID, &s.Context, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
+	`, tenantID), id).Scan(&s.ID, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
 
 	response.JSON(w, http.StatusOK, s)
 }

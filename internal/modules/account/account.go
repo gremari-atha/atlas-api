@@ -195,7 +195,6 @@ func (h *AccountHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 	page, limit, offset := response.ParsePagination(r)
 
 	q := r.URL.Query()
-	isLite := q.Get("lite") == "true"
 	emailFilter := q.Get("email")
 	statusFilter := q.Get("status")
 	variantFilter := q.Get("product_variant_id")
@@ -356,158 +355,75 @@ func (h *AccountHandler) FindAll(w http.ResponseWriter, r *http.Request) {
 		accounts = append(accounts, a)
 	}
 
-	if !isLite && len(accounts) > 0 {
-		// Bulk fetch profiles, users, and modifiers to avoid N+1 query problem
+	if len(accounts) > 0 {
 		accountIDs := make([]int64, len(accounts))
 		for i, a := range accounts {
 			accountIDs[i] = a.ID
 		}
 
-		// 1. Fetch profiles in bulk
-		pRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
-			SELECT id, name, max_user, allow_generate, metadata, account_id, created_at, updated_at
-			FROM "%s".account_profile
-			WHERE account_id = ANY($1)
-			ORDER BY name ASC
-		`, tenantID), accountIDs)
-		if err == nil {
-			defer pRows.Close()
-			var profiles []ProfileInfo
-			var profileIDs []int64
-			for pRows.Next() {
-				var pr ProfileInfo
-				if err := pRows.Scan(&pr.ID, &pr.Name, &pr.MaxUser, &pr.AllowGenerate, &pr.Metadata, &pr.AccountID, &pr.CreatedAt, &pr.UpdatedAt); err == nil {
-					profiles = append(profiles, pr)
-					profileIDs = append(profileIDs, pr.ID)
-				}
-			}
-
-			// 2. Fetch users in bulk
-			userMap := make(map[int64][]UserInfo)
-			if len(profileIDs) > 0 {
-				uRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
-					SELECT id, name, status, expired_at, account_profile_id, account_id, created_at, updated_at
-					FROM "%s".account_user
-					WHERE account_profile_id = ANY($1) AND status = 'active'
-				`, tenantID), profileIDs)
-				if err == nil {
-					defer uRows.Close()
-					for uRows.Next() {
-						var u UserInfo
-						if err := uRows.Scan(&u.ID, &u.Name, &u.Status, &u.ExpiredAt, &u.AccountProfileID, &u.AccountID, &u.CreatedAt, &u.UpdatedAt); err == nil {
-							userMap[u.AccountProfileID] = append(userMap[u.AccountProfileID], u)
-						}
-					}
-				}
-			}
-
-			// Assemble users into profiles
-			profileMap := make(map[int64][]ProfileInfo)
-			for _, pr := range profiles {
-				if users, found := userMap[pr.ID]; found {
-					pr.User = users
-				} else {
-					pr.User = []UserInfo{}
-				}
-				profileMap[pr.AccountID] = append(profileMap[pr.AccountID], pr)
-			}
-
-			// 3. Fetch modifiers in bulk
-			modifierMap := make(map[int64][]ModifierInfo)
-			mRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
-				SELECT id, modifier_id, metadata, enabled, account_id, created_at, updated_at
-				FROM "%s".account_modifier
-				WHERE account_id = ANY($1) AND enabled = true
-			`, tenantID), accountIDs)
-			if err == nil {
-				defer mRows.Close()
-				for mRows.Next() {
-					var m ModifierInfo
-					if err := mRows.Scan(&m.ID, &m.ModifierID, &m.Metadata, &m.Enabled, &m.AccountID, &m.CreatedAt, &m.UpdatedAt); err == nil {
-						modifierMap[m.AccountID] = append(modifierMap[m.AccountID], m)
-					}
-				}
-			}
-
-			// Assemble profiles and modifiers into accounts
-			for i := range accounts {
-				if profs, found := profileMap[accounts[i].ID]; found {
-					accounts[i].Profile = profs
-				} else {
-					accounts[i].Profile = []ProfileInfo{}
-				}
-				if mods, found := modifierMap[accounts[i].ID]; found {
-					accounts[i].Modifier = mods
-				} else {
-					accounts[i].Modifier = []ModifierInfo{}
-				}
-			}
+		type SlotBreakdown struct {
+			MaxAllow       int
+			ActiveAllow    int
+			MaxDisallow    int
+			ActiveDisallow int
+			ProfileCount   int
 		}
-	} else if isLite && len(accounts) > 0 {
-		// Bulk fetch counts for lite queries to avoid N+1 query problem
-		accountIDs := make([]int64, len(accounts))
-		for i, a := range accounts {
-			accountIDs[i] = a.ID
-		}
-
-		type ProfileStat struct {
-			ProfileCount int
-			MaxUser      int
-		}
-		profileStatMap := make(map[int64]ProfileStat)
-		pRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
-			SELECT 
-				account_id,
-				COUNT(id) AS profile_count,
-				COALESCE(SUM(max_user), 0) AS max_user
-			FROM "%s".account_profile
-			WHERE account_id = ANY($1)
-			GROUP BY account_id
-		`, tenantID), accountIDs)
-		if err == nil {
-			defer pRows.Close()
-			for pRows.Next() {
-				var accID int64
-				var ps ProfileStat
-				if err := pRows.Scan(&accID, &ps.ProfileCount, &ps.MaxUser); err == nil {
-					profileStatMap[accID] = ps
-				}
-			}
-		}
-
-		userCountMap := make(map[int64]int)
-		uRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
+		breakdownMap := make(map[int64]SlotBreakdown)
+		bRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
 			SELECT 
 				ap.account_id,
-				COUNT(au.id) AS user_count
-			FROM "%s".account_user au
-			JOIN "%s".account_profile ap ON au.account_profile_id = ap.id
-			WHERE ap.account_id = ANY($1) AND au.status = 'active'
+				COALESCE(SUM(CASE WHEN ap.allow_generate = true THEN ap.max_user ELSE 0 END), 0)::int AS max_allow,
+				COALESCE(SUM(CASE WHEN ap.allow_generate = true THEN COALESCE(uc.active_count, 0) ELSE 0 END), 0)::int AS active_allow,
+				COALESCE(SUM(CASE WHEN ap.allow_generate = false THEN ap.max_user ELSE 0 END), 0)::int AS max_disallow,
+				COALESCE(SUM(CASE WHEN ap.allow_generate = false THEN COALESCE(uc.active_count, 0) ELSE 0 END), 0)::int AS active_disallow,
+				COUNT(ap.id)::int AS profile_count
+			FROM "%s".account_profile ap
+			LEFT JOIN (
+				SELECT account_profile_id, COUNT(*) as active_count
+				FROM "%s".account_user
+				WHERE status = 'active'
+				GROUP BY account_profile_id
+			) uc ON uc.account_profile_id = ap.id
+			WHERE ap.account_id = ANY($1)
 			GROUP BY ap.account_id
 		`, tenantID, tenantID), accountIDs)
 		if err == nil {
-			defer uRows.Close()
-			for uRows.Next() {
+			defer bRows.Close()
+			for bRows.Next() {
 				var accID int64
-				var count int
-				if err := uRows.Scan(&accID, &count); err == nil {
-					userCountMap[accID] = count
+				var sb SlotBreakdown
+				if err := bRows.Scan(&accID, &sb.MaxAllow, &sb.ActiveAllow, &sb.MaxDisallow, &sb.ActiveDisallow, &sb.ProfileCount); err == nil {
+					breakdownMap[accID] = sb
 				}
 			}
 		}
 
 		for i := range accounts {
-			if stat, found := profileStatMap[accounts[i].ID]; found {
-				accounts[i].ProfileCount = stat.ProfileCount
-				accounts[i].MaxUser = stat.MaxUser
+			if sb, found := breakdownMap[accounts[i].ID]; found {
+				accounts[i].ProfileCount = sb.ProfileCount
+				accounts[i].MaxUser = sb.MaxAllow + sb.MaxDisallow
+				accounts[i].UserCount = sb.ActiveAllow + sb.ActiveDisallow
+				
+				// Refine Status
+				if accounts[i].Status != "disable" {
+					totalActive := sb.ActiveAllow + sb.ActiveDisallow
+					if totalActive == 0 {
+						accounts[i].Status = "ready"
+					} else if sb.ActiveAllow < sb.MaxAllow {
+						accounts[i].Status = "active"
+					} else if sb.ActiveDisallow < sb.MaxDisallow {
+						accounts[i].Status = "full_manual"
+					} else {
+						accounts[i].Status = "full"
+					}
+				}
 			} else {
 				accounts[i].ProfileCount = 0
 				accounts[i].MaxUser = 0
-			}
-			if count, found := userCountMap[accounts[i].ID]; found {
-				accounts[i].UserCount = count
-			} else {
 				accounts[i].UserCount = 0
+				if accounts[i].Status != "disable" {
+					accounts[i].Status = "ready"
+				}
 			}
 		}
 	}
@@ -598,6 +514,8 @@ func (h *AccountHandler) FindOne(w http.ResponseWriter, r *http.Request) {
 	} else {
 		a.Profile = []ProfileInfo{}
 	}
+
+	a.Status = h.CalculateAccountStatus(a.Status, a.Profile)
 
 	// Get modifiers
 	mRows, err := h.dbPool.Query(r.Context(), fmt.Sprintf(`
@@ -1258,18 +1176,12 @@ func (h *AccountHandler) CountStatusAccount(w http.ResponseWriter, r *http.Reque
 		)
 
 		SELECT
-			(SELECT COUNT(*) FROM profile_calc
-			 WHERE is_account_valid = 1 AND allow_generate = true AND has_slot = 1
-			)::int as profiles_available,
-
-			(SELECT COUNT(*) FROM profile_calc
-			 WHERE is_account_valid = 1 AND allow_generate = false AND has_slot = 1
-			)::int as profiles_locked,
-
-			COUNT(CASE WHEN available_gen_profiles > 0 THEN 1 END)::int as accounts_providing_slots,
-
-			COUNT(CASE WHEN total_gen_profiles > 0 AND available_gen_profiles = 0 THEN 1 END)::int as accounts_full
-		FROM account_agg;
+			COALESCE(SUM(CASE WHEN allow_generate = true THEN GREATEST(0, max_user - current_usage) ELSE 0 END), 0)::int as profiles_available,
+			COALESCE(SUM(CASE WHEN allow_generate = false THEN GREATEST(0, max_user - current_usage) ELSE 0 END), 0)::int as profiles_locked,
+			COALESCE((SELECT COUNT(CASE WHEN available_gen_profiles > 0 THEN 1 END) FROM account_agg), 0)::int as accounts_providing_slots,
+			COALESCE((SELECT COUNT(CASE WHEN total_gen_profiles > 0 AND available_gen_profiles = 0 THEN 1 END) FROM account_agg), 0)::int as accounts_full
+		FROM profile_calc
+		WHERE is_account_valid = 1;
 	`, tenantID, tenantID, tenantID, cteFilterSql)
 
 	var profilesAvailable, profilesLocked, accountsWithSlots, accountsFull int
@@ -2209,4 +2121,34 @@ func (h *AccountHandler) RemoveUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *AccountHandler) CalculateAccountStatus(statusInDB string, profiles []ProfileInfo) string {
+	if statusInDB == "disable" {
+		return "disable"
+	}
+	if len(profiles) == 0 {
+		return "ready"
+	}
+	var maxAllow, activeAllow, maxDisallow, activeDisallow int
+	for _, pr := range profiles {
+		if pr.AllowGenerate {
+			maxAllow += pr.MaxUser
+			activeAllow += len(pr.User)
+		} else {
+			maxDisallow += pr.MaxUser
+			activeDisallow += len(pr.User)
+		}
+	}
+	totalActive := activeAllow + activeDisallow
+	if totalActive == 0 {
+		return "ready"
+	}
+	if activeAllow < maxAllow {
+		return "active"
+	}
+	if activeDisallow < maxDisallow {
+		return "full_manual"
+	}
+	return "full"
 }

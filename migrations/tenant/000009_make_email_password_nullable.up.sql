@@ -1,0 +1,1 @@
+ALTER TABLE email ALTER COLUMN password DROP NOT NULL;

@@ -1,0 +1,2 @@
+ALTER TABLE email_subject ADD COLUMN context VARCHAR NOT NULL DEFAULT '';
+ALTER TABLE email_message_ts ADD COLUMN parsed_context VARCHAR NOT NULL DEFAULT '';

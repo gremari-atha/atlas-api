@@ -40,7 +40,6 @@ type EmailMessage struct {
 	FromEmail     string    `json:"from_email"`
 	Subject       string    `json:"subject"`
 	EmailDate     time.Time `json:"email_date"`
-	ParsedContext string    `json:"parsed_context"`
 	ParsedData    string    `json:"parsed_data"`
 	CreatedAt     time.Time `json:"created_at"`
 }
@@ -357,7 +356,7 @@ func (h *EmailHandler) FindAllEmailMessages(w http.ResponseWriter, r *http.Reque
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, tenant_id, from_email, subject, email_date, parsed_context, parsed_data, created_at 
+		SELECT id, tenant_id, from_email, subject, email_date, parsed_data, created_at 
 		FROM "%s".email_message_ts 
 		%s 
 		ORDER BY created_at DESC 
@@ -376,7 +375,7 @@ func (h *EmailHandler) FindAllEmailMessages(w http.ResponseWriter, r *http.Reque
 	var messages []EmailMessage
 	for rows.Next() {
 		var em EmailMessage
-		err = rows.Scan(&em.ID, &em.TenantID, &em.FromEmail, &em.Subject, &em.EmailDate, &em.ParsedContext, &em.ParsedData, &em.CreatedAt)
+		err = rows.Scan(&em.ID, &em.TenantID, &em.FromEmail, &em.Subject, &em.EmailDate, &em.ParsedData, &em.CreatedAt)
 		if err == nil {
 			messages = append(messages, em)
 		}

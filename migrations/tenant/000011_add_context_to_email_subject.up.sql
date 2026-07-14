@@ -1,0 +1,1 @@
+ALTER TABLE email_subject ADD COLUMN context VARCHAR NOT NULL DEFAULT '';

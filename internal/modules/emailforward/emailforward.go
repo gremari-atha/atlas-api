@@ -326,7 +326,6 @@ func (w *EmailForwardWorker) processNextJob() (bool, error) {
 
 type EmailForwardSubjectInfo struct {
 	Subject       string
-	Context       string
 	ExtractMethod string
 }
 
@@ -355,7 +354,7 @@ func (w *EmailForwardWorker) processPayload(payloadJson string) error {
 	}
 
 	rows, err := tx.Query(ctx, fmt.Sprintf(`
-		SELECT subject, context, extract_method 
+		SELECT subject, extract_method 
 		FROM "%s".email_subject
 		WHERE subject = ANY($1)
 	`, payload.Tenant), subjList)
@@ -367,7 +366,7 @@ func (w *EmailForwardWorker) processPayload(payloadJson string) error {
 	var matchedSubjects []EmailForwardSubjectInfo
 	for rows.Next() {
 		var info EmailForwardSubjectInfo
-		if err := rows.Scan(&info.Subject, &info.Context, &info.ExtractMethod); err == nil {
+		if err := rows.Scan(&info.Subject, &info.ExtractMethod); err == nil {
 			matchedSubjects = append(matchedSubjects, info)
 		}
 	}
@@ -391,21 +390,22 @@ func (w *EmailForwardWorker) processPayload(payloadJson string) error {
 
 				if data != nil {
 					_, err = tx.Exec(ctx, fmt.Sprintf(`
-						INSERT INTO "%s".email_message_ts (tenant_id, from_email, subject, email_date, parsed_context, parsed_data, created_at)
-						VALUES ($1, $2, $3, $4, $5, $6, NOW())
-					`, payload.Tenant), payload.Tenant, e.From, e.Subject, e.Date, es.Context, *data)
+						INSERT INTO "%s".email_message_ts (tenant_id, from_email, subject, email_date, parsed_data, created_at)
+						VALUES ($1, $2, $3, $4, $5, NOW())
+					`, payload.Tenant), payload.Tenant, e.From, e.Subject, e.Date, *data)
 					if err != nil {
 						return fmt.Errorf("failed to insert email message record: %w", err)
 					}
 
 					sanitizedEmail := parser.SanitizeEmail(e.From)
-					eventName := fmt.Sprintf("%s:%s", sanitizedEmail, es.Context)
+					eventName := sanitizedEmail
 
 					go w.wsHub.BroadcastEvent(eventName, map[string]interface{}{
-						"from":    e.From,
-						"date":    e.Date,
-						"subject": e.Subject,
-						"data":    *data,
+						"from":           e.From,
+						"date":           e.Date,
+						"subject":        e.Subject,
+						"extract_method": es.ExtractMethod,
+						"data":           *data,
 					})
 				}
 			}

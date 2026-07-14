@@ -3,7 +3,6 @@ package redisrelay
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"strings"
 
@@ -12,12 +11,12 @@ import (
 )
 
 type EmailEvent struct {
-	TenantID string `json:"tenant_id"`
-	From     string `json:"from"`
-	Date     string `json:"date"`
-	Subject  string `json:"subject"`
-	Context  string `json:"context"`
-	Data     string `json:"data"`
+	TenantID      string `json:"tenant_id"`
+	From          string `json:"from"`
+	Date          string `json:"date"`
+	Subject       string `json:"subject"`
+	ExtractMethod string `json:"extract_method"`
+	Data          string `json:"data"`
 }
 
 type EventRelay struct {
@@ -60,16 +59,18 @@ func (er *EventRelay) Start(ctx context.Context) {
 				// Sanitize the email address matching existing emailforward format (e.g. info_netflix_com)
 				replacer := strings.NewReplacer(".", "_", "@", "_")
 				sanitizedEmail := replacer.Replace(strings.ToLower(event.From))
-				eventName := fmt.Sprintf("%s:%s", sanitizedEmail, event.Context)
+				
+				eventName := sanitizedEmail
 
 				slog.Debug("Relaying email event to WebSockets", "eventName", eventName, "tenantID", event.TenantID)
 
 				// Broadcast via Monolith WebSocket Hub
 				er.wsHub.BroadcastEvent(eventName, map[string]interface{}{
-					"from":    event.From,
-					"date":    event.Date,
-					"subject": event.Subject,
-					"data":    event.Data,
+					"from":           event.From,
+					"date":           event.Date,
+					"subject":        event.Subject,
+					"extract_method": event.ExtractMethod,
+					"data":           event.Data,
 				})
 			}
 		}

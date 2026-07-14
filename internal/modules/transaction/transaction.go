@@ -104,6 +104,7 @@ type Expense struct {
 type EmailSubject struct {
 	ID            int64     `json:"id,string"`
 	Subject       string    `json:"subject"`
+	Context       *string   `json:"context"`
 	ExtractMethod string    `json:"extract_method"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
@@ -143,12 +144,14 @@ type UpdateExpensePayload struct {
 }
 
 type CreateEmailSubjectPayload struct {
-	Subject       string `json:"subject" validate:"required"`
-	ExtractMethod string `json:"extract_method" validate:"required"`
+	Subject       string  `json:"subject" validate:"required"`
+	Context       *string `json:"context"`
+	ExtractMethod string  `json:"extract_method" validate:"required"`
 }
 
 type UpdateEmailSubjectPayload struct {
 	Subject       *string `json:"subject"`
+	Context       *string `json:"context"`
 	ExtractMethod *string `json:"extract_method"`
 }
 
@@ -1287,17 +1290,49 @@ func (h *TransactionHandler) FindAllEmailSubjects(w http.ResponseWriter, r *http
 	tenantID := uCtx.TenantID
 	page, limit, offset := response.ParsePagination(r)
 
-	var subs []EmailSubject
-	var total int64
+	q := r.URL.Query()
+	subjectFilter := q.Get("subject")
+	contextFilter := q.Get("context")
 
-	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".email_subject`, tenantID)
-	err := h.dbPool.QueryRow(r.Context(), countQuery).Scan(&total)
+	whereClauses := []string{}
+	var args []interface{}
+	argCount := 1
+
+	if subjectFilter != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("subject ILIKE $%d", argCount))
+		args = append(args, "%"+subjectFilter+"%")
+		argCount++
+	}
+
+	if contextFilter != "" {
+		if strings.Contains(contextFilter, ",") {
+			parts := strings.Split(contextFilter, ",")
+			for i, p := range parts {
+				parts[i] = strings.TrimSpace(p)
+			}
+			whereClauses = append(whereClauses, fmt.Sprintf("context = ANY($%d)", argCount))
+			args = append(args, parts)
+			argCount++
+		} else {
+			whereClauses = append(whereClauses, fmt.Sprintf("context = $%d", argCount))
+			args = append(args, contextFilter)
+			argCount++
+		}
+	}
+
+	whereClause := ""
+	if len(whereClauses) > 0 {
+		whereClause = "WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	var total int64
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".email_subject %s`, tenantID, whereClause)
+	err := h.dbPool.QueryRow(r.Context(), countQuery, args...).Scan(&total)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "database count failed", err)
 		return
 	}
 
-	q := r.URL.Query()
 	orderBy := q.Get("order_by")
 	orderDir := q.Get("order_direction")
 
@@ -1316,22 +1351,25 @@ func (h *TransactionHandler) FindAllEmailSubjects(w http.ResponseWriter, r *http
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, subject, extract_method, created_at, updated_at
+		SELECT id, subject, context, extract_method, created_at, updated_at
 		FROM "%s".email_subject
+		%s
 		ORDER BY %s
-		LIMIT $1 OFFSET $2
-	`, tenantID, orderByClause)
+		LIMIT $%d OFFSET $%d
+	`, tenantID, whereClause, orderByClause, argCount, argCount+1)
 
-	rows, err := h.dbPool.Query(r.Context(), selectQuery, limit, offset)
+	selectArgs := append(args, limit, offset)
+	rows, err := h.dbPool.Query(r.Context(), selectQuery, selectArgs...)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "database query failed", err)
 		return
 	}
 	defer rows.Close()
 
+	var subs []EmailSubject
 	for rows.Next() {
 		var s EmailSubject
-		err = rows.Scan(&s.ID, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
+		err = rows.Scan(&s.ID, &s.Subject, &s.Context, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "database scan failed", err)
 			return
@@ -1349,9 +1387,9 @@ func (h *TransactionHandler) FindOneEmailSubject(w http.ResponseWriter, r *http.
 
 	var s EmailSubject
 	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT id, subject, extract_method, created_at, updated_at
+		SELECT id, subject, context, extract_method, created_at, updated_at
 		FROM "%s".email_subject WHERE id = $1
-	`, tenantID), id).Scan(&s.ID, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
+	`, tenantID), id).Scan(&s.ID, &s.Subject, &s.Context, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
 
 	if err != nil {
 		response.Error(w, http.StatusNotFound, fmt.Sprintf("emailSubject dengan id: %d tidak ditemukan", id), err)
@@ -1368,10 +1406,10 @@ func (h *TransactionHandler) CreateEmailSubject(w http.ResponseWriter, r *http.R
 
 	var s EmailSubject
 	err := h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		INSERT INTO "%s".email_subject (subject, extract_method, created_at, updated_at)
-		VALUES ($1, $2, NOW(), NOW())
-		RETURNING id, subject, extract_method, created_at, updated_at
-	`, tenantID), payload.Subject, payload.ExtractMethod).Scan(&s.ID, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
+		INSERT INTO "%s".email_subject (subject, context, extract_method, created_at, updated_at)
+		VALUES ($1, $2, $3, NOW(), NOW())
+		RETURNING id, subject, context, extract_method, created_at, updated_at
+	`, tenantID), payload.Subject, payload.Context, payload.ExtractMethod).Scan(&s.ID, &s.Subject, &s.Context, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
 
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "failed to insert email subject", err)
@@ -1404,6 +1442,11 @@ func (h *TransactionHandler) UpdateEmailSubject(w http.ResponseWriter, r *http.R
 		args = append(args, *payload.Subject)
 		argIdx++
 	}
+	if payload.Context != nil {
+		query += fmt.Sprintf("context = $%d, ", argIdx)
+		args = append(args, payload.Context)
+		argIdx++
+	}
 	if payload.ExtractMethod != nil {
 		query += fmt.Sprintf("extract_method = $%d, ", argIdx)
 		args = append(args, *payload.ExtractMethod)
@@ -1433,9 +1476,9 @@ func (h *TransactionHandler) UpdateEmailSubject(w http.ResponseWriter, r *http.R
 
 	var s EmailSubject
 	_ = h.dbPool.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT id, subject, extract_method, created_at, updated_at
+		SELECT id, subject, context, extract_method, created_at, updated_at
 		FROM "%s".email_subject WHERE id = $1
-	`, tenantID), id).Scan(&s.ID, &s.Subject, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
+	`, tenantID), id).Scan(&s.ID, &s.Subject, &s.Context, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
 
 	response.JSON(w, http.StatusOK, s)
 }

@@ -156,7 +156,7 @@ func main() {
 	productHandler := product.NewProductHandler(dbPool)
 	productHandler.RegisterRoutes(r, auth)
 
-	transactionHandler := transaction.NewTransactionHandler(dbPool)
+	transactionHandler := transaction.NewTransactionHandler(dbPool, redisClient)
 	transactionHandler.RegisterRoutes(r, auth)
 
 	loggerHandler := logger.NewLoggerHandler(dbPool)

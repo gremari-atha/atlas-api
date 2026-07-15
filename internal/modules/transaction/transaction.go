@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 // DB models
@@ -156,11 +157,12 @@ type UpdateEmailSubjectPayload struct {
 }
 
 type TransactionHandler struct {
-	dbPool *pgxpool.Pool
+	dbPool      *pgxpool.Pool
+	redisClient *redis.Client
 }
 
-func NewTransactionHandler(dbPool *pgxpool.Pool) *TransactionHandler {
-	return &TransactionHandler{dbPool: dbPool}
+func NewTransactionHandler(dbPool *pgxpool.Pool, redisClient *redis.Client) *TransactionHandler {
+	return &TransactionHandler{dbPool: dbPool, redisClient: redisClient}
 }
 
 func (h *TransactionHandler) RegisterRoutes(r chi.Router, auth *middleware.AuthMiddleware) {
@@ -1416,6 +1418,11 @@ func (h *TransactionHandler) CreateEmailSubject(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Publish cache invalidation event to Redis
+	if err := h.redisClient.Publish(r.Context(), "email_rules:invalidation", tenantID).Err(); err != nil {
+		slog.Error("failed to publish rule cache invalidation on create", "tenant", tenantID, "err", err)
+	}
+
 	response.JSON(w, http.StatusCreated, s)
 }
 
@@ -1480,6 +1487,11 @@ func (h *TransactionHandler) UpdateEmailSubject(w http.ResponseWriter, r *http.R
 		FROM "%s".email_subject WHERE id = $1
 	`, tenantID), id).Scan(&s.ID, &s.Subject, &s.Context, &s.ExtractMethod, &s.CreatedAt, &s.UpdatedAt)
 
+	// Publish cache invalidation event to Redis
+	if err := h.redisClient.Publish(r.Context(), "email_rules:invalidation", tenantID).Err(); err != nil {
+		slog.Error("failed to publish rule cache invalidation on update", "tenant", tenantID, "err", err)
+	}
+
 	response.JSON(w, http.StatusOK, s)
 }
 
@@ -1497,6 +1509,11 @@ func (h *TransactionHandler) RemoveEmailSubject(w http.ResponseWriter, r *http.R
 	if res.RowsAffected() == 0 {
 		response.Error(w, http.StatusNotFound, fmt.Sprintf("emailSubject dengan id: %d tidak ditemukan", id), err)
 		return
+	}
+
+	// Publish cache invalidation event to Redis
+	if err := h.redisClient.Publish(r.Context(), "email_rules:invalidation", tenantID).Err(); err != nil {
+		slog.Error("failed to publish rule cache invalidation on remove", "tenant", tenantID, "err", err)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

@@ -98,6 +98,7 @@ func (h *EmailHandler) RegisterRoutes(r chi.Router, auth *middleware.AuthMiddlew
 		r.Delete("/{id}", h.RemoveEmail)
 		r.With(middleware.ValidateBody[ConnectIMAPPayload]()).Post("/connect-imap", h.ConnectIMAP)
 		r.With(middleware.ValidateBody[ConnectResendPayload]()).Post("/connect-resend", h.ConnectResend)
+		r.With(middleware.ValidateBody[ConnectCloudflarePayload]()).Post("/connect-cloudflare", h.ConnectCloudflare)
 	})
 
 	r.Route("/email-connections", func(r chi.Router) {
@@ -599,6 +600,45 @@ func (h *EmailHandler) ConnectResend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.JSON(w, http.StatusOK, map[string]string{"status": "SUCCESS", "message": "Resend account connected successfully"})
+}
+
+type ConnectCloudflarePayload struct {
+	EmailAccountID string `json:"email_account_id" validate:"required,uuid"`
+	Token          string `json:"token" validate:"required,min=8"`
+}
+
+func (h *EmailHandler) ConnectCloudflare(w http.ResponseWriter, r *http.Request) {
+	payload := middleware.GetBody[ConnectCloudflarePayload](r)
+
+	// 1. Verify target email account exists in master.email_accounts
+	var email string
+	err := h.dbPool.QueryRow(r.Context(), `
+		SELECT email FROM master.email_accounts WHERE id = $1
+	`, payload.EmailAccountID).Scan(&email)
+	if err != nil {
+		response.Error(w, http.StatusNotFound, "Akun email tidak ditemukan", err)
+		return
+	}
+
+	// 2. Save credentials to master.email_accounts
+	creds := map[string]interface{}{
+		"token": payload.Token,
+	}
+	credsBytes, _ := json.Marshal(creds)
+
+	_, err = h.dbPool.Exec(r.Context(), `
+		UPDATE master.email_accounts
+		SET credentials = $1, provider = 'cloudflare', status = 'ACTIVE', last_sync_at = NOW(), last_error = NULL, updated_at = NOW()
+		WHERE id = $2
+	`, string(credsBytes), payload.EmailAccountID)
+
+	if err != nil {
+		slog.Error("failed to update cloudflare credentials", "id", payload.EmailAccountID, "err", err)
+		response.Error(w, http.StatusInternalServerError, "Gagal menyimpan kredensial ke database", err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, map[string]string{"status": "SUCCESS", "message": "Cloudflare account connected successfully"})
 }
 
 func (h *EmailHandler) DisconnectEmailConnection(w http.ResponseWriter, r *http.Request) {

@@ -41,6 +41,7 @@ type EmailMessage struct {
 	Subject       string    `json:"subject"`
 	EmailDate     time.Time `json:"email_date"`
 	ParsedData    string    `json:"parsed_data"`
+	ExtractMethod string    `json:"extract_method"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 
@@ -110,6 +111,7 @@ func (h *EmailHandler) RegisterRoutes(r chi.Router, auth *middleware.AuthMiddlew
 	r.Route("/email-message", func(r chi.Router) {
 		r.Use(auth.TenantAuth)
 		r.Get("/", h.FindAllEmailMessages)
+		r.Get("/{id}", h.FindOneEmailMessage)
 	})
 
 	r.Route("/admin/gcp-projects", func(r chi.Router) {
@@ -357,7 +359,9 @@ func (h *EmailHandler) FindAllEmailMessages(w http.ResponseWriter, r *http.Reque
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, tenant_id, from_email, subject, email_date, parsed_data, created_at 
+		SELECT id, tenant_id, from_email, subject, email_date, 
+		       CASE WHEN extract_method = 'RAW' THEN '' ELSE parsed_data END as parsed_data,
+		       extract_method, created_at 
 		FROM "%s".email_message_ts 
 		%s 
 		ORDER BY created_at DESC 
@@ -376,13 +380,37 @@ func (h *EmailHandler) FindAllEmailMessages(w http.ResponseWriter, r *http.Reque
 	var messages []EmailMessage
 	for rows.Next() {
 		var em EmailMessage
-		err = rows.Scan(&em.ID, &em.TenantID, &em.FromEmail, &em.Subject, &em.EmailDate, &em.ParsedData, &em.CreatedAt)
+		err = rows.Scan(&em.ID, &em.TenantID, &em.FromEmail, &em.Subject, &em.EmailDate, &em.ParsedData, &em.ExtractMethod, &em.CreatedAt)
 		if err == nil {
 			messages = append(messages, em)
 		}
 	}
 
 	response.JSON(w, http.StatusOK, response.NewPaginationResponse(messages, total, page, limit))
+}
+
+func (h *EmailHandler) FindOneEmailMessage(w http.ResponseWriter, r *http.Request) {
+	uCtx, _ := middleware.GetUserContext(r.Context())
+	tenantID := uCtx.TenantID
+	id := chi.URLParam(r, "id")
+
+	query := fmt.Sprintf(`
+		SELECT id, tenant_id, from_email, subject, email_date, parsed_data, extract_method, created_at 
+		FROM "%s".email_message_ts 
+		WHERE id = $1
+	`, tenantID)
+
+	var em EmailMessage
+	err := h.dbPool.QueryRow(r.Context(), query, id).Scan(
+		&em.ID, &em.TenantID, &em.FromEmail, &em.Subject, &em.EmailDate, &em.ParsedData, &em.ExtractMethod, &em.CreatedAt,
+	)
+	if err != nil {
+		slog.Error("failed to find email message", "tenant", tenantID, "id", id, "err", err)
+		response.Error(w, http.StatusNotFound, "Email message tidak ditemukan", err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, em)
 }
 
 // ==========================================
